@@ -1,284 +1,230 @@
 import streamlit as st
 import pandas as pd
 from ortools.sat.python import cp_model
+import uuid
 
-# --- 1. CONFIGURACIÓN Y DATOS ---
-st.set_page_config(page_title="Opti-Plan Consolidado", layout="wide")
+# --- 1. CONFIGURACIÓN ---
+st.set_page_config(page_title="Opti-Plan Pro", layout="wide")
 
-# Tasas de rendimiento base (Generic)
+# Rendimientos Base
 BASE_RATES = {
     'MAV': {'turno': 20, 'admin': 26},
     'MAS': {'turno': 15, 'admin': 20},
     'Celulosa': {'turno': 35, 'admin': 46},
     'Papel': {'turno': 10, 'admin': 13}
 }
-
-# Lista completa de productos específicos (Cliente_Producto)
-# Esto permite que el modelo optimice cada uno por separado
-SPECIFIC_PRODUCTS = [
-    'Celulosa_CMPC', 'Celulosa_ARAUCO',
-    'MAV_CMPC', 'MAV_ARAUCO',
-    'MAS_CMPC', 'MAS_ARAUCO',
-    'Papel_CMPC', 'Papel_ARAUCO'
-]
+BASE_PRODUCTS_KEYS = list(BASE_RATES.keys())
 
 DAYS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
 SHIFTS_ORDER = ['Admin', 'T1', 'T2', 'T3']
+PRIORITY_WEIGHTS = {1: 1, 2: 2, 3: 5, 4: 15, 5: 100}
+SCALE = 10 # Granularidad (10 = 1.0 Cuadrilla)
 
-# Función helper para obtener la tasa correcta dado un producto específico
-def get_rate(specific_product, type_rate):
-    # Extrae "Celulosa" de "Celulosa_CMPC"
-    base_category = specific_product.split('_')[0] 
-    return BASE_RATES[base_category][type_rate]
+# --- 2. GESTIÓN DE ESTADO ---
+if 'naves_list' not in st.session_state:
+    st.session_state.naves_list = []
 
-# --- 2. INTERFAZ DE USUARIO (STREAMLIT) ---
-st.title("PLANIFICACIÓN SEMANAL DE CUADRILLAS")
-st.markdown("### Vista Detallada por Cliente")
+def add_nave():
+    demandas = {}
+    # Arauco
+    if st.session_state.ar_cel > 0: demandas['Celulosa_ARAUCO'] = st.session_state.ar_cel
+    if st.session_state.ar_mav > 0: demandas['MAV_ARAUCO'] = st.session_state.ar_mav
+    if st.session_state.ar_mas > 0: demandas['MAS_ARAUCO'] = st.session_state.ar_mas
+    if st.session_state.ar_pap > 0: demandas['Papel_ARAUCO'] = st.session_state.ar_pap
+    # CMPC
+    if st.session_state.cm_cel > 0: demandas['Celulosa_CMPC'] = st.session_state.cm_cel
+    if st.session_state.cm_mav > 0: demandas['MAV_CMPC'] = st.session_state.cm_mav
+    if st.session_state.cm_mas > 0: demandas['MAS_CMPC'] = st.session_state.cm_mas
+    if st.session_state.cm_pap > 0: demandas['Papel_CMPC'] = st.session_state.cm_pap
 
+    new_nave = {
+        'id': str(uuid.uuid4())[:8],
+        'nombre': st.session_state.temp_nombre,
+        'prioridad': st.session_state.temp_prioridad,
+        'demandas': demandas
+    }
+    
+    if new_nave['nombre'] and len(demandas) > 0:
+        st.session_state.naves_list.append(new_nave)
+        st.toast(f"Nave {new_nave['nombre']} agregada", icon="✅")
+    else:
+        st.toast("Error: Falta nombre o carga.", icon="⚠️")
+
+def delete_nave(nave_id):
+    st.session_state.naves_list = [n for n in st.session_state.naves_list if n['id'] != nave_id]
+
+def clear_all():
+    st.session_state.naves_list = []
+
+# --- 3. SIDEBAR ---
 with st.sidebar:
-    st.header("📦 Demanda Semanal")
-    st.write("Ingrese la cantidad total a consolidar:")
-    
-    # Diccionario para guardar la demanda de cada producto específico
-    demands = {}
+    st.header("🚢 Gestión de Naves")
+    with st.expander("➕ Agregar Nueva Nave", expanded=True):
+        st.text_input("Nombre de Nave", key="temp_nombre", placeholder="Ej: Hooge")
+        st.slider("Prioridad", 1, 5, 3, key="temp_prioridad")
+        st.markdown("---")
+        c1, c2 = st.columns(2)
+        with c1:
+            st.markdown("**🌲 ARAUCO**")
+            st.number_input("Celulosa", min_value=0, key="ar_cel")
+            st.number_input("MAV", min_value=0, key="ar_mav")
+            st.number_input("MAS", min_value=0, key="ar_mas")
+            st.number_input("Papel", min_value=0, key="ar_pap")
+        with c2:
+            st.markdown("**📦 CMPC**")
+            st.number_input("Celulosa", min_value=0, key="cm_cel")
+            st.number_input("MAV", min_value=0, key="cm_mav")
+            st.number_input("MAS", min_value=0, key="cm_mas")
+            st.number_input("Papel", min_value=0, key="cm_pap")
+        st.button("Agregar", on_click=add_nave, type="primary")
 
-    st.subheader("Prioritario")
-    demands['Celulosa_CMPC'] = st.number_input("CELULOSA CMPC", min_value=0, value=200)
-    demands['Celulosa_ARAUCO'] = st.number_input("CELULOSA ARAUCO", min_value=0, value=218)
+    st.divider()
+    st.subheader(f"En Cola ({len(st.session_state.naves_list)})")
+    if st.session_state.naves_list:
+        for nave in st.session_state.naves_list:
+            st.info(f"{nave['nombre']} (Prio {nave['prioridad']})")
+            if st.button("Borrar", key=f"del_{nave['id']}"):
+                delete_nave(nave['id'])
+                st.rerun()
 
-    st.subheader("Otros Productos")
-    col1, col2 = st.columns(2)
-    with col1:
-        demands['MAV_CMPC'] = st.number_input("MAV CMPC", min_value=0, value=20)
-        demands['MAS_CMPC'] = st.number_input("MAS CMPC", min_value=0, value=15)
-        demands['Papel_CMPC'] = st.number_input("PAPEL CMPC", min_value=0, value=10)
-    with col2:
-        demands['MAV_ARAUCO'] = st.number_input("MAV ARAUCO", min_value=0, value=24)
-        demands['MAS_ARAUCO'] = st.number_input("MAS ARAUCO", min_value=0, value=6)
-        demands['Papel_ARAUCO'] = st.number_input("PAPEL ARAUCO", min_value=0, value=0)
+    run_opt = st.button("🚀 CALCULAR PLAN", type="primary", disabled=not st.session_state.naves_list)
 
-    run_optimization = st.button("🔄 Generar Planificación", type="primary")
-
-# --- 3. LÓGICA DE OPTIMIZACIÓN (OR-TOOLS) ---
-def solve_schedule(demand_dict):
+# --- 4. OPTIMIZACIÓN CON RESTRICCIÓN DE PRODUCTO ÚNICO ---
+def solve_multinave(naves):
     model = cp_model.CpModel()
+    x = {} # Turnos
+    y = {} # Admin
+    three_crews_used = {} 
 
-    # Filtramos productos con demanda > 0 para no gastar recursos computacionales en vacíos
-    active_products = [p for p in SPECIFIC_PRODUCTS if demand_dict[p] > 0]
-
-    # Variables
-    x = {} # Cuadrillas turno
-    for d in range(len(DAYS)):
-        for s in range(3): # T1, T2, T3
-            for p in active_products:
-                x[d, s, p] = model.NewIntVar(0, 3, f'x_{d}_{s}_{p}')
-    
-    y = {} # Cuadrilla Admin
-    for d in range(len(DAYS)):
-        for p in active_products:
-            y[d, p] = model.NewBoolVar(f'y_{d}_{p}')
-            
-    three_crews_used = {} # Penalización
+    # 1. Definir Variables
     for d in range(len(DAYS)):
         for s in range(3):
-             three_crews_used[d, s] = model.NewBoolVar(f'3crews_{d}_{s}')
+            three_crews_used[d, s] = model.NewBoolVar(f'3crews_{d}_{s}')
+        
+        for n_idx, nave in enumerate(naves):
+            for p_key in nave['demandas'].keys():
+                y[d, n_idx, p_key] = model.NewIntVar(0, 1 * SCALE, f'y_{d}_{n_idx}_{p_key}')
+                for s in range(3):
+                    x[d, s, n_idx, p_key] = model.NewIntVar(0, 3 * SCALE, f'x_{d}_{s}_{n_idx}_{p_key}')
 
-    # Restricciones
+    # 2. Restricciones Generales
     for d in range(len(DAYS)):
-        # Max 1 Admin por día (entre todos los clientes y productos)
-        model.Add(sum(y[d, p] for p in active_products) <= 1)
-        
+        # Admin Global <= 1
+        admin_tasks = [y[d, n, p] for n, nave in enumerate(naves) for p in nave['demandas']]
+        model.Add(sum(admin_tasks) <= 1 * SCALE)
+
         for s in range(3):
-            # Max 3 cuadrillas por turno (SUMA de CMPC + ARAUCO + ETC)
-            total_crews_in_shift = sum(x[d, s, p] for p in active_products)
-            model.Add(total_crews_in_shift <= 3)
+            # Turno Global <= 3
+            shift_tasks = [x[d, s, n, p] for n, nave in enumerate(naves) for p in nave['demandas']]
+            total_scaled = sum(shift_tasks)
+            model.Add(total_scaled <= 3 * SCALE)
+            model.Add(total_scaled <= 2 * SCALE + three_crews_used[d, s] * 1000)
+
+            # --- NUEVA RESTRICCIÓN: INTEGRIDAD DE PRODUCTO ---
+            # Para cada tipo base (Celulosa, MAV, etc), la suma total de cuadrillas
+            # asignadas (sumando todos los clientes y naves) debe ser ENTERA.
+            # Esto evita que 0.5 cuadrilla haga Celulosa y el otro 0.5 haga MAV.
+            for base_prod in BASE_PRODUCTS_KEYS:
+                # Recolectamos todas las variables de este tipo de producto en este turno
+                prod_vars = []
+                for n_idx, nave in enumerate(naves):
+                    for p_key in nave['demandas']:
+                        if base_prod in p_key: # Ej: "Celulosa" in "Celulosa_ARAUCO"
+                            prod_vars.append(x[d, s, n_idx, p_key])
+                
+                if prod_vars:
+                    total_prod_capacity = sum(prod_vars)
+                    # Variable auxiliar entera (0, 1, 2, 3 cuadrillas completas)
+                    crews_integer = model.NewIntVar(0, 3, f'whole_crews_{d}_{s}_{base_prod}')
+                    # Obligamos a que la capacidad total sea multiplo exacto de 10 (SCALE)
+                    model.Add(total_prod_capacity == crews_integer * SCALE)
+
+    # 3. Demanda
+    for n_idx, nave in enumerate(naves):
+        for p_key, qty in nave['demandas'].items():
+            base_prod = p_key.split('_')[0]
+            rt = BASE_RATES[base_prod]['turno']
+            ra = BASE_RATES[base_prod]['admin']
             
-            # Activar variable de penalización si se usan más de 2
-            model.Add(total_crews_in_shift <= 2 + three_crews_used[d, s])
+            prod = sum(x[d, s, n_idx, p_key] for d in range(len(DAYS)) for s in range(3)) * rt + \
+                   sum(y[d, n_idx, p_key] for d in range(len(DAYS))) * ra
+            
+            # Ajuste matemático: Sum(Var) * Rate >= Demand * Scale
+            model.Add(prod >= qty * SCALE)
 
-    # Cumplimiento Demanda
-    for p in active_products:
-        rate_turno = get_rate(p, 'turno')
-        rate_admin = get_rate(p, 'admin')
-        
-        total_production = sum(x[d, s, p] * rate_turno for d in range(len(DAYS)) for s in range(3)) + \
-                           sum(y[d, p] * rate_admin for d in range(len(DAYS)))
-        model.Add(total_production >= demand_dict[p])
-
-    # Objetivos
+    # 4. Objetivo
     obj_terms = []
-    time_weight_base = 10
     for d in range(len(DAYS)):
-        day_cost = (d + 1) * time_weight_base * 3
-        
-        # Costo Admin
-        for p in active_products:
-            priority_discount = 5 if 'Celulosa' in p else 0
-            obj_terms.append(y[d, p] * (day_cost - priority_discount)) 
-
-        # Costo Turnos
+        time_cost = (d + 1) * 10
+        for n_idx, nave in enumerate(naves):
+            w = PRIORITY_WEIGHTS[nave['prioridad']]
+            for p_key in nave['demandas']:
+                is_cel = 1 if 'Celulosa' in p_key else 0
+                obj_terms.append(y[d, n_idx, p_key] * ((time_cost - is_cel) * w))
+                for s in range(3):
+                    sc = time_cost + (s + 1)
+                    obj_terms.append(x[d, s, n_idx, p_key] * ((sc - is_cel) * w))
         for s in range(3):
-            shift_cost = (s + 1) * time_weight_base
-            total_time_cost = day_cost + shift_cost
-            
-            for p in active_products:
-                priority_discount = 5 if 'Celulosa' in p else 0
-                obj_terms.append(x[d, s, p] * (total_time_cost - priority_discount)) 
-            
-            # Penalización fuerte por usar 3 cuadrillas
-            obj_terms.append(three_crews_used[d, s] * 500) 
+            obj_terms.append(three_crews_used[d, s] * 5000)
 
     model.Minimize(sum(obj_terms))
-
-    # Resolver
+    
     solver = cp_model.CpSolver()
     status = solver.Solve(model)
-
-    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        results = []
-        shifts_labels = ['T1', 'T2', 'T3']
-        for d in range(len(DAYS)):
-            # Output Admin
-            for p in active_products:
-                if solver.Value(y[d, p]) > 0:
-                    prod = get_rate(p, 'admin')
-                    # Separamos Cliente y Producto para la tabla
-                    base_prod, client = p.split('_')
-                    results.append([DAYS[d], 'Admin', client, base_prod, 1, prod])
-            # Output Turnos
-            for s in range(3):
-                for p in active_products:
-                    num_crews = solver.Value(x[d, s, p])
-                    if num_crews > 0:
-                        prod = num_crews * get_rate(p, 'turno')
-                        base_prod, client = p.split('_')
-                        results.append([DAYS[d], shifts_labels[s], client, base_prod, num_crews, prod])
-        
-        df_results = pd.DataFrame(results, columns=['Día', 'Turno', 'Cliente', 'Producto', 'Cuadrillas', 'Producción'])
-        return df_results, status
-    else:
-        return None, status
-
-# --- 4. EJECUCIÓN Y VISUALIZACIÓN ---
-
-if run_optimization:
-    total_demand = sum(demands.values())
     
-    with st.spinner("Optimizando turnos por cliente..."):
-        df_plan, status = solve_schedule(demands)
+    res = []
+    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
+        for d in range(len(DAYS)):
+            for n_idx, nave in enumerate(naves):
+                for p_key in nave['demandas']:
+                    bp, cl = p_key.split('_')
+                    # Admin
+                    vy = solver.Value(y[d, n_idx, p_key])
+                    if vy > 0:
+                        res.append({'Día': DAYS[d], 'Turno': 'Admin', 'Nave': nave['nombre'], 
+                                   'Prioridad': nave['prioridad'], 'Cliente': cl, 'Producto': bp,
+                                   'Cuadrillas': vy/SCALE, 'Producción': (vy/SCALE)*BASE_RATES[bp]['admin']})
+                    # Turnos
+                    for s in range(3):
+                        vx = solver.Value(x[d, s, n_idx, p_key])
+                        if vx > 0:
+                            res.append({'Día': DAYS[d], 'Turno': SHIFTS_ORDER[s+1], 'Nave': nave['nombre'], 
+                                       'Prioridad': nave['prioridad'], 'Cliente': cl, 'Producto': bp,
+                                       'Cuadrillas': vx/SCALE, 'Producción': (vx/SCALE)*BASE_RATES[bp]['turno']})
+        return pd.DataFrame(res), status
+    return None, status
 
-    if df_plan is not None:
-        # --- TRANSFORMACIÓN PARA TABLA ---
+# --- 5. VISUALIZACIÓN ---
+st.title("PLANIFICACIÓN OPERATIVA")
+st.caption("Regla aplicada: Una cuadrilla no mezcla productos distintos, pero puede mezclar clientes.")
+
+if run_opt:
+    with st.spinner("Optimizando..."):
+        df, stt = solve_multinave(st.session_state.naves_list)
+    
+    if df is not None:
+        def fmt(r):
+            pc = {1:'#4caf50', 5:'#d32f2f'}.get(r['Prioridad'], '#ffeb3b')
+            cc = "#0d47a1" if r['Cliente'] == "ARAUCO" else "#1b5e20"
+            crews = f"{r['Cuadrillas']:.1f}".rstrip('0').rstrip('.')
+            return (f"<div class='cell-box'><div class='cell-header'>"
+                    f"<span style='background:{pc}; color:white; border-radius:50%; width:16px; height:16px; display:flex; justify-content:center; align-items:center; font-size:0.7em;'>{r['Prioridad']}</span>"
+                    f"<span style='background:{cc}; color:white; border-radius:3px; padding:0 3px; font-size:0.7em;'>{r['Cliente'][:3]}</span></div>"
+                    f"<div class='cell-body'>👥{crews} 📦{int(r['Producción'])}</div></div>")
+
+        df['Info'] = df.apply(fmt, axis=1)
+        piv = df.pivot_table(index=['Nave', 'Producto'], columns=['Día', 'Turno'], values='Info', aggfunc=''.join)
+        piv = piv.reindex(columns=pd.MultiIndex.from_product([DAYS, SHIFTS_ORDER])).fillna("-")
         
-        # 1. Formato de Celda HTML
-        df_plan['Info_Celda'] = df_plan.apply(
-            lambda row: f"<div class='cell-content'><div class='crew-badge'>👥 {row['Cuadrillas']}</div><div class='prod-info'>📦 {int(row['Producción'])}</div></div>", axis=1
-        )
-
-        # 2. Pivot Table con Índice Múltiple (Cliente, Producto)
-        pivot_excel = df_plan.pivot_table(
-            index=['Cliente', 'Producto'],
-            columns=['Día', 'Turno'],
-            values='Info_Celda',
-            aggfunc=lambda x: ''.join(x) 
-        )
-
-        # 3. Reindexar columnas (Orden correcto)
-        full_columns = pd.MultiIndex.from_product([DAYS, SHIFTS_ORDER], names=['Día', 'Turno'])
-        pivot_excel = pivot_excel.reindex(columns=full_columns)
+        st.markdown("""<style>
+            .cell-box {display: flex; flex-direction: column; align-items: center; gap: 2px;}
+            .cell-header {display: flex; gap: 3px;}
+            .cell-body {background: #e3f2fd; padding: 2px 4px; border-radius: 4px; font-size: 0.85em;}
+            table {width: 100%; border-collapse: collapse;}
+            th, td {border: 1px solid #ddd; padding: 4px; text-align: center;}
+            thead tr:first-child th {background: #263238; color: white;}
+        </style>""", unsafe_allow_html=True)
         
-        # 4. Rellenar vacíos
-        pivot_excel = pivot_excel.fillna("<span style='color: #eee;'>-</span>")
-
-        # --- ESTILOS CSS (SCROLLABLE + DISEÑO) ---
-        st.markdown("""
-        <style>
-            /* Contenedor principal para hacer scroll horizontal */
-            .table-container {
-                width: 100%;
-                overflow-x: auto;
-                white-space: nowrap;
-                border: 1px solid #ddd;
-                border-radius: 5px;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-            }
-            
-            /* Estilos de la tabla */
-            .styled-table {
-                width: 100%;
-                border-collapse: collapse;
-                font-family: sans-serif;
-                font-size: 0.9em;
-            }
-            
-            /* Celdas y Encabezados */
-            .styled-table th, .styled-table td {
-                border: 1px solid #ddd;
-                padding: 8px;
-                text-align: center;
-                min-width: 80px; /* Ancho mínimo para forzar el scroll si es necesario */
-            }
-            
-            /* Encabezado Días (Azul oscuro) */
-            .styled-table thead tr:first-child th {
-                background-color: #004a7c;
-                color: white;
-                font-weight: bold;
-                text-transform: uppercase;
-            }
-            
-            /* Encabezado Turnos (Gris claro) */
-            .styled-table thead tr:nth-child(2) th {
-                background-color: #f0f2f6;
-                color: #333;
-                font-size: 0.8em;
-            }
-            
-            /* Columnas fijas a la izquierda (Cliente/Producto) - Opcional sticky */
-            .styled-table tbody th {
-                background-color: #fafafa;
-                font-weight: bold;
-                text-align: left;
-                padding-left: 10px;
-            }
-
-            /* Estilo interno de celda */
-            .cell-content {
-                display: flex;
-                flex-direction: column;
-                align-items: center;
-                gap: 2px;
-            }
-            .crew-badge {
-                background-color: #e3f2fd;
-                color: #0d47a1;
-                padding: 2px 6px;
-                border-radius: 10px;
-                font-weight: bold;
-                font-size: 0.85em;
-            }
-            .prod-info {
-                color: #555;
-                font-size: 0.8em;
-            }
-        </style>
-        """, unsafe_allow_html=True)
-
-        st.success(f"Plan Generado. Total: {total_demand} u.")
-        
-        # Renderizamos la tabla dentro del div contenedor
-        html = pivot_excel.to_html(escape=False, classes="styled-table")
-        st.markdown(f'<div class="table-container">{html}</div>', unsafe_allow_html=True)
-
-        # --- VALIDACIÓN POR CLIENTE ---
-        st.markdown("### Resumen de Cumplimiento")
-        val_df = df_plan.groupby(['Cliente', 'Producto'])['Producción'].sum().reset_index()
-        # Mapeamos la meta original
-        val_df['Meta'] = val_df.apply(lambda x: demands[f"{x['Producto']}_{x['Cliente']}"], axis=1)
-        val_df['%'] = (val_df['Producción'] / val_df['Meta'] * 100).fillna(0).round(1)
-        st.dataframe(val_df, use_container_width=True)
-
-    elif status == cp_model.INFEASIBLE:
-        st.error("Imposible cumplir la demanda total con las restricciones de cuadrillas (Máx 3 por turno entre todos los clientes).")
+        st.write(piv.to_html(escape=False), unsafe_allow_html=True)
     else:
-        st.error("Error al optimizar.")
+        st.error("No hay solución factible.")
