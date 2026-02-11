@@ -1,230 +1,436 @@
 import streamlit as st
 import pandas as pd
+import plotly.express as px
 from ortools.sat.python import cp_model
-import uuid
+from datetime import datetime, timedelta, time
 
-# --- 1. CONFIGURACIÓN ---
-st.set_page_config(page_title="Opti-Plan Pro", layout="wide")
+# ==============================================================================
+# 1. CONFIGURACIÓN
+# ==============================================================================
+st.set_page_config(layout="wide", page_title="Planificador CFS Multicliente")
 
-# Rendimientos Base
-BASE_RATES = {
-    'MAV': {'turno': 20, 'admin': 26},
-    'MAS': {'turno': 15, 'admin': 20},
-    'Celulosa': {'turno': 35, 'admin': 46},
-    'Papel': {'turno': 10, 'admin': 13}
+# Rendimientos (Cnts por turno)
+RENDIMIENTOS = {
+    "Plywood":            {"Turno": 13, "Admin": 17},
+    "Moldura":            {"Turno": 15, "Admin": 20},
+    "Mad Seca (MAS)":     {"Turno": 15, "Admin": 20},
+    "Mad Verde (MAV)":    {"Turno": 20, "Admin": 26},
+    "Celulosa":           {"Turno": 35, "Admin": 46},
+    "Papel Kraft":        {"Turno": 10, "Admin": 13}
 }
-BASE_PRODUCTS_KEYS = list(BASE_RATES.keys())
 
-DAYS = ['Lunes', 'Martes', 'Miércoles', 'Jueves', 'Viernes', 'Sábado', 'Domingo']
-SHIFTS_ORDER = ['Admin', 'T1', 'T2', 'T3']
-PRIORITY_WEIGHTS = {1: 1, 2: 2, 3: 5, 4: 15, 5: 100}
-SCALE = 10 # Granularidad (10 = 1.0 Cuadrilla)
+TURNOS_INFO = {0: "T1", 1: "T2", 2: "T3"} 
+TURNOS_MAP_REVERSE = {"T1": 0, "T2": 1, "T3": 2} 
 
-# --- 2. GESTIÓN DE ESTADO ---
-if 'naves_list' not in st.session_state:
-    st.session_state.naves_list = []
+# Estado de sesión
+if 'naves_db' not in st.session_state:
+    st.session_state['naves_db'] = {} 
 
-def add_nave():
-    demandas = {}
-    # Arauco
-    if st.session_state.ar_cel > 0: demandas['Celulosa_ARAUCO'] = st.session_state.ar_cel
-    if st.session_state.ar_mav > 0: demandas['MAV_ARAUCO'] = st.session_state.ar_mav
-    if st.session_state.ar_mas > 0: demandas['MAS_ARAUCO'] = st.session_state.ar_mas
-    if st.session_state.ar_pap > 0: demandas['Papel_ARAUCO'] = st.session_state.ar_pap
-    # CMPC
-    if st.session_state.cm_cel > 0: demandas['Celulosa_CMPC'] = st.session_state.cm_cel
-    if st.session_state.cm_mav > 0: demandas['MAV_CMPC'] = st.session_state.cm_mav
-    if st.session_state.cm_mas > 0: demandas['MAS_CMPC'] = st.session_state.cm_mas
-    if st.session_state.cm_pap > 0: demandas['Papel_CMPC'] = st.session_state.cm_pap
+# ==============================================================================
+# 2. FUNCIONES AUXILIARES
+# ==============================================================================
+def obtener_turno_de_hora(hora):
+    h_val = hora.hour + (hora.minute / 60.0)
+    if 8 <= h_val < 15.5: return 0, "T1"
+    elif 15.5 <= h_val < 23: return 1, "T2"
+    else: return 2, "T3"
 
-    new_nave = {
-        'id': str(uuid.uuid4())[:8],
-        'nombre': st.session_state.temp_nombre,
-        'prioridad': st.session_state.temp_prioridad,
-        'demandas': demandas
-    }
-    
-    if new_nave['nombre'] and len(demandas) > 0:
-        st.session_state.naves_list.append(new_nave)
-        st.toast(f"Nave {new_nave['nombre']} agregada", icon="✅")
-    else:
-        st.toast("Error: Falta nombre o carga.", icon="⚠️")
-
-def delete_nave(nave_id):
-    st.session_state.naves_list = [n for n in st.session_state.naves_list if n['id'] != nave_id]
-
-def clear_all():
-    st.session_state.naves_list = []
-
-# --- 3. SIDEBAR ---
-with st.sidebar:
-    st.header("🚢 Gestión de Naves")
-    with st.expander("➕ Agregar Nueva Nave", expanded=True):
-        st.text_input("Nombre de Nave", key="temp_nombre", placeholder="Ej: Hooge")
-        st.slider("Prioridad", 1, 5, 3, key="temp_prioridad")
-        st.markdown("---")
-        c1, c2 = st.columns(2)
-        with c1:
-            st.markdown("**🌲 ARAUCO**")
-            st.number_input("Celulosa", min_value=0, key="ar_cel")
-            st.number_input("MAV", min_value=0, key="ar_mav")
-            st.number_input("MAS", min_value=0, key="ar_mas")
-            st.number_input("Papel", min_value=0, key="ar_pap")
-        with c2:
-            st.markdown("**📦 CMPC**")
-            st.number_input("Celulosa", min_value=0, key="cm_cel")
-            st.number_input("MAV", min_value=0, key="cm_mav")
-            st.number_input("MAS", min_value=0, key="cm_mas")
-            st.number_input("Papel", min_value=0, key="cm_pap")
-        st.button("Agregar", on_click=add_nave, type="primary")
-
-    st.divider()
-    st.subheader(f"En Cola ({len(st.session_state.naves_list)})")
-    if st.session_state.naves_list:
-        for nave in st.session_state.naves_list:
-            st.info(f"{nave['nombre']} (Prio {nave['prioridad']})")
-            if st.button("Borrar", key=f"del_{nave['id']}"):
-                delete_nave(nave['id'])
-                st.rerun()
-
-    run_opt = st.button("🚀 CALCULAR PLAN", type="primary", disabled=not st.session_state.naves_list)
-
-# --- 4. OPTIMIZACIÓN CON RESTRICCIÓN DE PRODUCTO ÚNICO ---
-def solve_multinave(naves):
+# ==============================================================================
+# 3. MOTOR DE OPTIMIZACIÓN
+# ==============================================================================
+def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str):
     model = cp_model.CpModel()
-    x = {} # Turnos
-    y = {} # Admin
-    three_crews_used = {} 
-
-    # 1. Definir Variables
-    for d in range(len(DAYS)):
-        for s in range(3):
-            three_crews_used[d, s] = model.NewBoolVar(f'3crews_{d}_{s}')
-        
-        for n_idx, nave in enumerate(naves):
-            for p_key in nave['demandas'].keys():
-                y[d, n_idx, p_key] = model.NewIntVar(0, 1 * SCALE, f'y_{d}_{n_idx}_{p_key}')
-                for s in range(3):
-                    x[d, s, n_idx, p_key] = model.NewIntVar(0, 3 * SCALE, f'x_{d}_{s}_{n_idx}_{p_key}')
-
-    # 2. Restricciones Generales
-    for d in range(len(DAYS)):
-        # Admin Global <= 1
-        admin_tasks = [y[d, n, p] for n, nave in enumerate(naves) for p in nave['demandas']]
-        model.Add(sum(admin_tasks) <= 1 * SCALE)
-
-        for s in range(3):
-            # Turno Global <= 3
-            shift_tasks = [x[d, s, n, p] for n, nave in enumerate(naves) for p in nave['demandas']]
-            total_scaled = sum(shift_tasks)
-            model.Add(total_scaled <= 3 * SCALE)
-            model.Add(total_scaled <= 2 * SCALE + three_crews_used[d, s] * 1000)
-
-            # --- NUEVA RESTRICCIÓN: INTEGRIDAD DE PRODUCTO ---
-            # Para cada tipo base (Celulosa, MAV, etc), la suma total de cuadrillas
-            # asignadas (sumando todos los clientes y naves) debe ser ENTERA.
-            # Esto evita que 0.5 cuadrilla haga Celulosa y el otro 0.5 haga MAV.
-            for base_prod in BASE_PRODUCTS_KEYS:
-                # Recolectamos todas las variables de este tipo de producto en este turno
-                prod_vars = []
-                for n_idx, nave in enumerate(naves):
-                    for p_key in nave['demandas']:
-                        if base_prod in p_key: # Ej: "Celulosa" in "Celulosa_ARAUCO"
-                            prod_vars.append(x[d, s, n_idx, p_key])
-                
-                if prod_vars:
-                    total_prod_capacity = sum(prod_vars)
-                    # Variable auxiliar entera (0, 1, 2, 3 cuadrillas completas)
-                    crews_integer = model.NewIntVar(0, 3, f'whole_crews_{d}_{s}_{base_prod}')
-                    # Obligamos a que la capacidad total sea multiplo exacto de 10 (SCALE)
-                    model.Add(total_prod_capacity == crews_integer * SCALE)
-
-    # 3. Demanda
-    for n_idx, nave in enumerate(naves):
-        for p_key, qty in nave['demandas'].items():
-            base_prod = p_key.split('_')[0]
-            rt = BASE_RATES[base_prod]['turno']
-            ra = BASE_RATES[base_prod]['admin']
-            
-            prod = sum(x[d, s, n_idx, p_key] for d in range(len(DAYS)) for s in range(3)) * rt + \
-                   sum(y[d, n_idx, p_key] for d in range(len(DAYS))) * ra
-            
-            # Ajuste matemático: Sum(Var) * Rate >= Demand * Scale
-            model.Add(prod >= qty * SCALE)
-
-    # 4. Objetivo
-    obj_terms = []
-    for d in range(len(DAYS)):
-        time_cost = (d + 1) * 10
-        for n_idx, nave in enumerate(naves):
-            w = PRIORITY_WEIGHTS[nave['prioridad']]
-            for p_key in nave['demandas']:
-                is_cel = 1 if 'Celulosa' in p_key else 0
-                obj_terms.append(y[d, n_idx, p_key] * ((time_cost - is_cel) * w))
-                for s in range(3):
-                    sc = time_cost + (s + 1)
-                    obj_terms.append(x[d, s, n_idx, p_key] * ((sc - is_cel) * w))
-        for s in range(3):
-            obj_terms.append(three_crews_used[d, s] * 5000)
-
-    model.Minimize(sum(obj_terms))
     
+    if not naves_db:
+        return pd.DataFrame(), pd.DataFrame(), "No hay naves registradas."
+
+    # --- A. Preparación de Tiempos ---
+    fechas_corte = [data['datetime_corte'].date() for data in naves_db.values()]
+    if not fechas_corte:
+        return pd.DataFrame(), pd.DataFrame(), "Datos de naves incompletos."
+
+    max_date = max(fechas_corte)
+    today = fecha_inicio_simulacion 
+    
+    # Aumentamos el horizonte (+5 días) para dar espacio a cargas atrasadas
+    days_horizon = max((max_date - today).days + 5, 2)
+    num_shifts = days_horizon * 3
+    
+    products = list(RENDIMIENTOS.keys())
+    
+    # Offset de inicio (para bloquear el pasado)
+    start_offset = TURNOS_MAP_REVERSE[turno_inicio_str]
+
+    # --- B. Variables ---
+    x = {} 
+    production = {} 
+
+    for s in range(num_shifts):
+        for p in products:
+            x[p, s, 'Turno'] = model.NewIntVar(0, 3, f'gang_T_{p}_{s}')
+            x[p, s, 'Admin'] = model.NewIntVar(0, 1, f'gang_A_{p}_{s}')
+            
+            rate_t = RENDIMIENTOS[p]['Turno']
+            rate_a = RENDIMIENTOS[p]['Admin']
+            
+            production[p, s] = model.NewIntVar(0, 2000, f'prod_{p}_{s}')
+            model.Add(production[p, s] == x[p, s, 'Turno'] * rate_t + x[p, s, 'Admin'] * rate_a)
+
+    # --- C. Restricciones Operativas ---
+    
+    for s in range(num_shifts):
+        # Bloqueo de pasado
+        if s < start_offset:
+            for p in products:
+                model.Add(x[p, s, 'Turno'] == 0)
+                model.Add(x[p, s, 'Admin'] == 0)
+        else:
+            model.Add(sum(x[p, s, 'Turno'] for p in products) <= 3)
+            model.Add(sum(x[p, s, 'Admin'] for p in products) <= 1)
+            
+            # Regla: Admin SOLO en T1
+            if s % 3 != 0:
+                for p in products:
+                    model.Add(x[p, s, 'Admin'] == 0)
+
+    # Regla: Max 1 Admin global por día
+    for d in range(days_horizon):
+        s1, s2, s3 = d*3, d*3+1, d*3+2
+        current_shifts = [s for s in [s1, s2, s3] if s < num_shifts]
+        total_admin_day = sum(x[p, s, 'Admin'] for p in products for s in current_shifts)
+        model.Add(total_admin_day <= 1)
+
+    # --- D. Procesamiento de Demandas y Penalizaciones ---
+    demandas_detalladas = []
+    
+    # Pre-procesar demandas
+    grouped_demands = [] # Lista de tuplas (producto, cantidad, deadline_idx)
+    
+    for nombre_nave, datos in naves_db.items():
+        dt_corte = datos['datetime_corte']
+        diff_days = (dt_corte.date() - today).days
+        t_idx, t_name = obtener_turno_de_hora(dt_corte.time())
+        
+        deadline_raw = (diff_days * 3) + t_idx
+        deadline_idx = max(0, deadline_raw)
+        
+        for item in datos['carga']:
+            grouped_demands.append({
+                'producto': item['producto'],
+                'cantidad': item['cantidad'],
+                'deadline': deadline_idx
+            })
+            demandas_detalladas.append({
+                'nave': nombre_nave,
+                'cliente': item['cliente'],
+                'producto': item['producto'],
+                'cantidad': item['cantidad'],
+                'deadline': deadline_idx,
+                'fecha_corte': dt_corte.date(),
+                'hora_corte': dt_corte.time(),
+                'turno_corte': t_name
+            })
+
+    # Construcción de Restricciones y Costos
+    cost = 0
+    
+    for p in products:
+        reqs_prod = [d for d in grouped_demands if d['producto'] == p]
+        reqs_prod.sort(key=lambda r: r['deadline'])
+        
+        acumulado = 0
+        for r in reqs_prod:
+            acumulado += r['cantidad']
+            deadline = r['deadline']
+            
+            # 1. RESTRICCIÓN FINAL: Al acabar la simulación, DEBE estar hecho (No negociable)
+            total_horizon_prod = sum(production[p, s] for s in range(num_shifts))
+            model.Add(total_horizon_prod >= acumulado)
+            
+            # 2. RESTRICCIÓN SUAVE (SOFT CONSTRAINT) EN EL DEADLINE
+            # Permitimos fallar, pero con penalización monstruosa
+            
+            if deadline < num_shifts:
+                # Calculamos producción hasta el deadline
+                prod_at_deadline = sum(production[p, s] for s in range(deadline + 1))
+                
+                # Variable de Holgura (Lo que faltó en el momento del corte)
+                shortfall_at_cutoff = model.NewIntVar(0, 100000, f'short_cut_{p}_{deadline}')
+                model.Add(prod_at_deadline + shortfall_at_cutoff >= acumulado)
+                
+                # PENALIZACIÓN 1: EL GOLPE (Multa por no tenerlo listo al corte)
+                cost += shortfall_at_cutoff * 1000000 
+                
+                # PENALIZACIÓN 2: LA CARRERA (Minimizar el retraso)
+                # Para cada turno DESPUÉS del deadline, si todavía falta, cobramos multa.
+                # Esto obliga a que el 'shortfall' baje a cero lo más rápido posible.
+                for s_late in range(deadline + 1, num_shifts):
+                    prod_at_late = sum(production[p, s] for s in range(s_late + 1))
+                    shortfall_late = model.NewIntVar(0, 100000, f'short_late_{p}_{s_late}')
+                    model.Add(prod_at_late + shortfall_late >= acumulado)
+                    
+                    # Multa por cada turno que pasa y sigo debiendo carga
+                    cost += shortfall_late * 5000 
+
+            # 3. Restricción Suave "1 Día Antes" (Buffer) - Prioridad Menor
+            soft_deadline = deadline - 3
+            if soft_deadline >= start_offset:
+                prod_soft = sum(production[p, s] for s in range(min(soft_deadline, num_shifts - 1) + 1))
+                shortfall_buffer = model.NewIntVar(0, 100000, f'short_buff_{p}_{deadline}')
+                model.Add(prod_soft + shortfall_buffer >= acumulado)
+                cost += shortfall_buffer * 50 # Peso bajo comparado con fallar el deadline
+
+    # Costo Operativo (Minimizar recursos usados)
+    for s in range(num_shifts):
+        if s >= start_offset:
+            t_gangs = sum(x[p, s, 'Turno'] for p in products)
+            a_gangs = sum(x[p, s, 'Admin'] for p in products)
+            
+            is_saturated = model.NewBoolVar(f'sat_{s}')
+            model.Add(t_gangs >= 3).OnlyEnforceIf(is_saturated)
+            model.Add(t_gangs < 3).OnlyEnforceIf(is_saturated.Not())
+            
+            # Peso muy bajo (10-100) vs Peso de Falla (1,000,000)
+            cost += t_gangs*10 + (a_gangs) + (is_saturated * 100)
+
+    model.Minimize(cost)
+    
+    # --- E. Solución ---
     solver = cp_model.CpSolver()
+    # Aumentamos un poco el tiempo límite por si es complejo
+    solver.parameters.max_time_in_seconds = 10.0 
     status = solver.Solve(model)
     
-    res = []
-    if status in [cp_model.OPTIMAL, cp_model.FEASIBLE]:
-        for d in range(len(DAYS)):
-            for n_idx, nave in enumerate(naves):
-                for p_key in nave['demandas']:
-                    bp, cl = p_key.split('_')
-                    # Admin
-                    vy = solver.Value(y[d, n_idx, p_key])
-                    if vy > 0:
-                        res.append({'Día': DAYS[d], 'Turno': 'Admin', 'Nave': nave['nombre'], 
-                                   'Prioridad': nave['prioridad'], 'Cliente': cl, 'Producto': bp,
-                                   'Cuadrillas': vy/SCALE, 'Producción': (vy/SCALE)*BASE_RATES[bp]['admin']})
-                    # Turnos
-                    for s in range(3):
-                        vx = solver.Value(x[d, s, n_idx, p_key])
-                        if vx > 0:
-                            res.append({'Día': DAYS[d], 'Turno': SHIFTS_ORDER[s+1], 'Nave': nave['nombre'], 
-                                       'Prioridad': nave['prioridad'], 'Cliente': cl, 'Producto': bp,
-                                       'Cuadrillas': vx/SCALE, 'Producción': (vx/SCALE)*BASE_RATES[bp]['turno']})
-        return pd.DataFrame(res), status
-    return None, status
+    if status in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        pool_produccion = []
+        for s in range(num_shifts):
+            if s >= start_offset:
+                for p in products:
+                    val = solver.Value(production[p, s])
+                    if val > 0:
+                        day_idx = s // 3
+                        shift_idx = s % 3
+                        fecha_real = today + timedelta(days=day_idx)
+                        
+                        pool_produccion.append({
+                            's_idx': s,
+                            'fecha': fecha_real,
+                            'turno_nom': TURNOS_INFO[shift_idx],
+                            'producto': p,
+                            'cantidad_disponible': val,
+                            'c_turno': solver.Value(x[p, s, 'Turno']),
+                            'c_admin': solver.Value(x[p, s, 'Admin'])
+                        })
 
-# --- 5. VISUALIZACIÓN ---
-st.title("PLANIFICACIÓN OPERATIVA")
-st.caption("Regla aplicada: Una cuadrilla no mezcla productos distintos, pero puede mezclar clientes.")
-
-if run_opt:
-    with st.spinner("Optimizando..."):
-        df, stt = solve_multinave(st.session_state.naves_list)
-    
-    if df is not None:
-        def fmt(r):
-            pc = {1:'#4caf50', 5:'#d32f2f'}.get(r['Prioridad'], '#ffeb3b')
-            cc = "#0d47a1" if r['Cliente'] == "ARAUCO" else "#1b5e20"
-            crews = f"{r['Cuadrillas']:.1f}".rstrip('0').rstrip('.')
-            return (f"<div class='cell-box'><div class='cell-header'>"
-                    f"<span style='background:{pc}; color:white; border-radius:50%; width:16px; height:16px; display:flex; justify-content:center; align-items:center; font-size:0.7em;'>{r['Prioridad']}</span>"
-                    f"<span style='background:{cc}; color:white; border-radius:3px; padding:0 3px; font-size:0.7em;'>{r['Cliente'][:3]}</span></div>"
-                    f"<div class='cell-body'>👥{crews} 📦{int(r['Producción'])}</div></div>")
-
-        df['Info'] = df.apply(fmt, axis=1)
-        piv = df.pivot_table(index=['Nave', 'Producto'], columns=['Día', 'Turno'], values='Info', aggfunc=''.join)
-        piv = piv.reindex(columns=pd.MultiIndex.from_product([DAYS, SHIFTS_ORDER])).fillna("-")
+        demandas_detalladas.sort(key=lambda x: x['deadline'])
+        plan_asignado = []
         
-        st.markdown("""<style>
-            .cell-box {display: flex; flex-direction: column; align-items: center; gap: 2px;}
-            .cell-header {display: flex; gap: 3px;}
-            .cell-body {background: #e3f2fd; padding: 2px 4px; border-radius: 4px; font-size: 0.85em;}
-            table {width: 100%; border-collapse: collapse;}
-            th, td {border: 1px solid #ddd; padding: 4px; text-align: center;}
-            thead tr:first-child th {background: #263238; color: white;}
-        </style>""", unsafe_allow_html=True)
+        # Asignación FIFO inteligente
+        # Nota: Aquí no forzamos deadline en el IF, permitimos tomar slots futuros
+        for demanda in demandas_detalladas:
+            qty_needed = demanda['cantidad']
+            prod_p = demanda['producto']
+            deadline_nave = demanda['deadline']
+            
+            for slot in pool_produccion:
+                # Aceptamos cualquier slot válido (incluso si es post-deadline, porque ya pagamos la multa)
+                if slot['producto'] == prod_p and slot['cantidad_disponible'] > 0:
+                    
+                    tomar = min(qty_needed, slot['cantidad_disponible'])
+                    
+                    # Detectar si está atrasado para marcarlo visualmente si quisiéramos
+                    es_tardio = slot['s_idx'] > deadline_nave
+                    
+                    plan_asignado.append({
+                        'Nave': demanda['nave'],
+                        'Cliente': demanda['cliente'],
+                        'Producto': demanda['producto'],
+                        'Fecha': slot['fecha'],
+                        'Turno': slot['turno_nom'],
+                        'Cantidad': tomar,
+                        'CutOff_Date': demanda['fecha_corte'], 
+                        'CutOff_Turn': demanda['turno_corte'],
+                        'Estado': 'ATRASADO' if es_tardio else 'OK' # Dato extra útil
+                    })
+                    slot['cantidad_disponible'] -= tomar
+                    qty_needed -= tomar
+                    if qty_needed <= 0: break
         
-        st.write(piv.to_html(escape=False), unsafe_allow_html=True)
+        df_recursos = pd.DataFrame(pool_produccion)
+        if not df_recursos.empty:
+            df_recursos = df_recursos.groupby(['fecha', 'turno_nom', 'producto'])[['c_turno', 'c_admin']].max().reset_index()
+            df_recursos['Periodo'] = df_recursos['fecha'].astype(str) + " " + df_recursos['turno_nom']
+
+        df_matrix = pd.DataFrame(plan_asignado)
+        
+        # Mensaje personalizado según si hubo atrasos
+        if any(d['Estado'] == 'ATRASADO' for d in plan_asignado):
+            msg = "Plan Generado con EXCEPCIONES: Alguna carga quedó fuera de fecha (revisar columnas post-cierre)."
+        else:
+            msg = "Plan Generado Exitosamente (Todo en fecha)."
+
+        return df_matrix, df_recursos, msg
     else:
-        st.error("No hay solución factible.")
+        return pd.DataFrame(), pd.DataFrame(), "No es factible. Revisa si la capacidad total del horizonte alcanza."
+
+# ==============================================================================
+# 4. INTERFAZ
+# ==============================================================================
+st.title("⚓ Planificador CFS - Multi Cliente")
+
+with st.sidebar:
+    st.header("⚙️ Configuración")
+    col_conf1, col_conf2 = st.columns(2)
+    fecha_inicio_plan = col_conf1.date_input("Fecha Inicio", value=datetime.now().date())
+    turno_inicio_plan = col_conf2.selectbox("Turno Inicio", ["T1", "T2", "T3"])
+    st.caption(f"Inicio: {fecha_inicio_plan} ({turno_inicio_plan})")
+    st.divider()
+
+    st.header("1. Gestión de Naves")
+    with st.expander("🚢 Añadir Nueva Nave", expanded=True):
+        new_nave_name = st.text_input("Nombre Nave")
+        col_d, col_t = st.columns(2)
+        d_input = col_d.date_input("Fecha Corte", value=datetime.now())
+        t_input = col_t.time_input("Hora Corte", value=time(15, 30))
+        
+        if st.button("Crear Nave"):
+            if new_nave_name and new_nave_name not in st.session_state['naves_db']:
+                dt_full = datetime.combine(d_input, t_input)
+                st.session_state['naves_db'][new_nave_name] = {"datetime_corte": dt_full, "carga": []}
+                st.success(f"Nave {new_nave_name} creada.")
+                st.rerun()
+            elif new_nave_name in st.session_state['naves_db']:
+                st.warning("Ya existe.")
+
+    if st.session_state['naves_db']:
+        st.header("2. Cargar Manifiesto")
+        with st.form("add_cargo_form"):
+            s_nave = st.selectbox("Seleccionar Nave", list(st.session_state['naves_db'].keys()))
+            c1, c2 = st.columns(2)
+            s_cliente = c1.selectbox("Cliente", ["ARAUCO", "CMPC"])
+            s_prod = c2.selectbox("Producto", list(RENDIMIENTOS.keys()))
+            s_qty = st.number_input("Cantidad (Cnts)", min_value=1, step=1)
+            if st.form_submit_button("➕ Agregar"):
+                st.session_state['naves_db'][s_nave]['carga'].append({"cliente": s_cliente, "producto": s_prod, "cantidad": s_qty})
+                st.success(f"Agregado a {s_nave}")
+                st.rerun()
+    st.divider()
+    
+    st.subheader("📋 Naves Activas")
+    naves_to_delete = []
+    for nave, data in st.session_state['naves_db'].copy().items():
+        if 'datetime_corte' not in data:
+            naves_to_delete.append(nave)
+            continue
+        dt_show = data['datetime_corte']
+        with st.expander(f"{nave} | {dt_show.strftime('%d-%m %H:%M')}"): 
+            if not data['carga']: st.write("*Sin carga*")
+            else:
+                for item in data['carga']: st.write(f"- {item['cantidad']} {item['producto']}")
+            if st.button(f"Borrar {nave}", key=f"del_{nave}"): naves_to_delete.append(nave)
+    if naves_to_delete:
+        for n in set(naves_to_delete): 
+            if n in st.session_state['naves_db']: del st.session_state['naves_db'][n]
+        st.rerun()
+
+# ==============================================================================
+# 5. DASHBOARD PRINCIPAL
+# ==============================================================================
+
+if st.session_state['naves_db']:
+    if st.button("🚀 Calcular Planificación Óptima", type="primary"):
+        df_matrix, df_recursos, msg = optimizar_plan(st.session_state['naves_db'], fecha_inicio_plan, turno_inicio_plan)
+        
+        if not df_matrix.empty:
+            if "EXCEPCIONES" in msg: st.warning(f"⚠️ {msg}")
+            else: st.success(f"✅ {msg}")
+            
+            st.subheader("📋 Matriz de Planificación")
+            
+            pivot_df = df_matrix.pivot_table(
+                index=['Nave', 'Cliente', 'Producto', 'CutOff_Date', 'CutOff_Turn'],
+                columns=['Fecha', 'Turno'],
+                values='Cantidad',
+                aggfunc='sum',
+                fill_value=0
+            )
+
+            # Reindexar para mostrar todo el rango
+            min_date = df_matrix['Fecha'].min()
+            max_date = df_matrix['Fecha'].max()
+            days_span = (max_date - min_date).days + 1
+            full_columns = []
+            for d in range(days_span):
+                current_date = min_date + timedelta(days=d)
+                for t in ["T1", "T2", "T3"]: 
+                    full_columns.append((current_date, t))
+            full_index = pd.MultiIndex.from_tuples(full_columns, names=['Fecha', 'Turno'])
+            pivot_df = pivot_df.reindex(columns=full_index, fill_value=0)            
+            
+            def format_zero(val): return "" if val == 0 else f"{val:.0f}"
+
+            def highlight_cutoff_precise(row):
+                if len(row.name) > 4:
+                    cutoff_date = row.name[3]
+                    cutoff_turn = row.name[4]
+                else: return ['' for _ in row]
+                
+                styles = []
+                # Flag para saber si ya pasamos el cutoff
+                pasado_cutoff = False
+                
+                for (col_date, col_turno), val in row.items():
+                    # Lógica estricta de orden temporal
+                    dt_col = datetime.combine(col_date, time(0,0)) # Dummy time
+                    dt_cut = datetime.combine(cutoff_date, time(0,0))
+                    
+                    # Comparar turno es complicado sin mapa, pero usaremos igualdad exacta para el borde rojo
+                    es_cutoff = (col_date == cutoff_date and col_turno == cutoff_turn)
+                    
+                    if es_cutoff:
+                        styles.append('background-color: #ffe6e6; color: #990000; border: 2px solid #ff4b4b !important; font-weight: bold;')
+                    elif val > 0:
+                        # Si hay valor y estamos en fecha posterior O (misma fecha y turno posterior? aprox)
+                        if col_date > cutoff_date:
+                             styles.append('background-color: #fff4e5; color: #d97706; font-weight: bold;') # Naranja: Atrasado
+                        else:
+                             styles.append('')
+                    else:
+                        styles.append('')
+                return styles
+
+            w_nave, w_clie, w_prod = 100, 100, 140
+            st.markdown(f"""
+                <style>
+                .table-container {{ width: 100%; max-height: 600px; overflow: auto; border: 1px solid #ccc; position: relative; }}
+                .custom-table {{ border-collapse: separate; border-spacing: 0; font-family: sans-serif; font-size: 13px; width: max-content; background-color: white; }}
+                .custom-table th, .custom-table td {{ border-right: 1px solid #e0e0e0; border-bottom: 1px solid #e0e0e0; padding: 6px 10px; white-space: nowrap; }}
+                .custom-table thead tr th {{ position: sticky; top: 0; background-color: #f0f2f6 !important; color: #333; z-index: 10; border-top: 1px solid #ccc; border-bottom: 2px solid #bbb; }}
+                .custom-table thead tr:nth-child(2) th {{ top: 30px; z-index: 10; }}
+                .custom-table tbody th.level0 {{ position: sticky; left: 0; min-width: {w_nave}px; max-width: {w_nave}px; background-color: #fff !important; z-index: 9; }}
+                .custom-table tbody th.level1 {{ position: sticky; left: {w_nave}px; min-width: {w_clie}px; max-width: {w_clie}px; background-color: #fff !important; z-index: 9; }}
+                .custom-table tbody th.level2 {{ position: sticky; left: {w_nave + w_clie}px; min-width: {w_prod}px; max-width: {w_prod}px; background-color: #fff !important; z-index: 9; border-right: 2px solid #aaa !important; box-shadow: 4px 0 5px -2px rgba(0,0,0,0.1); }}
+                .custom-table thead th:nth-child(1) {{ position: sticky !important; left: 0 !important; z-index: 20 !important; background-color: #e6e9ef !important; min-width: {w_nave}px; max-width: {w_nave}px; }}
+                .custom-table thead th:nth-child(2) {{ position: sticky !important; left: {w_nave}px !important; z-index: 20 !important; background-color: #e6e9ef !important; min-width: {w_clie}px; max-width: {w_clie}px; }}
+                .custom-table thead th:nth-child(3) {{ position: sticky !important; left: {w_nave + w_clie}px !important; z-index: 20 !important; background-color: #e6e9ef !important; border-right: 2px solid #aaa !important; min-width: {w_prod}px; max-width: {w_prod}px; }}
+                </style>
+            """, unsafe_allow_html=True)
+
+            html_table = pivot_df.style\
+                .format(format_zero)\
+                .apply(highlight_cutoff_precise, axis=1)\
+                .hide(level='CutOff_Date', axis=0) \
+                .hide(level='CutOff_Turn', axis=0) \
+                .set_table_attributes('class="custom-table"')\
+                .to_html(escape=False, sparsify=False)
+            
+            st.markdown(f'<div class="table-container">{html_table}</div>', unsafe_allow_html=True)
+            
+            st.divider()
+
+
+            
+        else:
+            st.error(f"❌ {msg}")
+else:
+    st.info("👈 Agrega Naves para comenzar.")
