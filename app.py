@@ -161,7 +161,8 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
             # Significa que Sábado (5) y Domingo (6) NO hay cuadrillas turno.
             if dia_semana >= 5: 
                 for p in products:
-                    model.Add(x[p, s, 'Turno'] == 0)
+
+                    model.Add(x[p, s, 'Admin'] == 0)
 
             # REGLA 2: Consolidar Domingo (Switch On/Off)
             # Si consolidar_domingo es False, nadie trabaja el domingo (ni Admin ni Turno)
@@ -519,3 +520,4 @@ if st.session_state['naves_db']:
             st.error(f"❌ {msg}")
 else:
     st.info("👈 Agrega Naves para comenzar.")
+
