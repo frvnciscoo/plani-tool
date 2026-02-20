@@ -181,13 +181,35 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
                         model.Add(x[p, s, 'Admin'] == 0)
 
             # REGLA 1: Fin de semana (Sábado y Domingo sin cuadrillas "Turno")
-            if dia_semana >= 5: 
+            day_idx = s // 3
+            fecha_actual = today + timedelta(days=day_idx)
+            dia_semana = fecha_actual.weekday() # 0=Lunes, ..., 5=Sábado, 6=Domingo
+
+            # --- LÓGICA DE TURNOS SEGÚN DÍA DE LA SEMANA ---
+            if dia_semana < 5: 
+                # LUNES A VIERNES: T1 exclusivo Admin, T2/T3 exclusivo Turno
+                if s % 3 == 0:
+                    for p in products:
+                        model.Add(x[p, s, 'Turno'] == 0)
+                else:
+                    for p in products:
+                        model.Add(x[p, s, 'Admin'] == 0)
+                        
+            elif dia_semana == 5:
+                # SÁBADO: Cero Admin. Cuadrillas de Turno pueden trabajar en T1, T2 y T3.
                 for p in products:
-                    # En la lógica original solo tenías Admin = 0 aquí, pero T1 ahora es solo Admin.
-                    # Si el fin de semana NO hay Turno, lo aseguramos explícitamente:
-                    model.Add(x[p, s, 'Turno'] == 0)
-                    # Y bloqueamos Admin también en sábados si así operan (ajustado de tu código base)
                     model.Add(x[p, s, 'Admin'] == 0)
+                    # Al no poner restricciones a 'Turno', el modelo los usará libremente
+                    
+            elif dia_semana == 6:
+                # DOMINGO: Depende del botón "Consolidar Domingo"
+                if not consolidar_domingo:
+                    for p in products:
+                        model.Add(x[p, s, 'Turno'] == 0)
+                        model.Add(x[p, s, 'Admin'] == 0)
+                else:
+                    for p in products:
+                        model.Add(x[p, s, 'Admin'] == 0)
 
             # REGLA 2: Consolidar Domingo (Switch On/Off)
             if dia_semana == 6 and not consolidar_domingo:
@@ -545,6 +567,7 @@ if st.session_state['naves_db']:
             st.error(f"❌ {msg}")
 else:
     st.info("👈 Agrega Naves para comenzar.")
+
 
 
 
