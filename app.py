@@ -106,7 +106,7 @@ def procesar_archivo_carga(uploaded_file):
 # 3. MOTOR DE OPTIMIZACIÓN (ACTUALIZADO)
 # ==============================================================================
 # ### NUEVO: Agregamos parámetros extra a la función
-def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_admin_max, consolidar_domingo, limites_turno_dinamicos):
+def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_admin_max, consolidar_domingo, cliente_filtro, limites_turno_dinamicos):
     model = cp_model.CpModel()
     
     if not naves_db: return pd.DataFrame(), pd.DataFrame(), "No hay naves."
@@ -183,10 +183,11 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
         deadline_idx = max(0, (diff_days * 3) + t_idx)
         
         for item in datos['carga']:
-            if item['producto'] not in products:
-                if "Otros" in products: item['producto'] = "Otros"
-                else: continue
+            # ---> APLICAR EL FILTRO DE CLIENTE <---
+            if cliente_filtro != "Todo" and item['cliente'].upper() != cliente_filtro:
+                continue
 
+            if item['producto'] not in products:
             grouped_demands.append({'producto': item['producto'], 'cantidad': item['cantidad'], 'deadline': deadline_idx})
             demandas_detalladas.append({
                 'nave': nombre_nave, 'cliente': item['cliente'], 'producto': item['producto'],
@@ -461,139 +462,172 @@ with st.sidebar:
 # ==============================================================================
 if st.session_state['naves_db']:
     
-    # --- PRE-CÁLCULO DE FECHAS PARA LA TABLA EDITABLE ---
+    # --- 1. PRE-CÁLCULO DEL HORIZONTE DE TIEMPO ---
     fechas_corte_pre = [data['datetime_corte'].date() for data in st.session_state['naves_db'].values()]
     max_date_pre = max(fechas_corte_pre) if fechas_corte_pre else fecha_inicio_plan
     days_horizon_pre = max((max_date_pre - fecha_inicio_plan).days + 7, 2)
     
     diccionario_limites = {}
+    columnas_ordenadas = []
     
-    # Llenamos la fila con la lógica base del puerto
+    # Llenamos la fila con la lógica base
     for d in range(days_horizon_pre):
         fecha_obj = fecha_inicio_plan + timedelta(days=d)
         dia_sem = fecha_obj.weekday()
         for t_idx, t_name in TURNOS_INFO.items():
-            col_name = f"{fecha_obj.strftime('%Y-%m-%d')} {t_name}"
+            # Clave única para el diccionario (usada en el modelo)
+            clave_interna = f"{fecha_obj.strftime('%Y-%m-%d')} {t_name}"
+            # Clave visible para las columnas de la UI
+            clave_columna = f"{fecha_obj.strftime('%d-%m')} {t_name}" 
             
-            if dia_sem < 5: # Lunes a Viernes
-                diccionario_limites[col_name] = 0 if t_idx == 0 else 2
-            elif dia_sem == 5: # Sábado
-                diccionario_limites[col_name] = 2
-            else: # Domingo
-                diccionario_limites[col_name] = 2 if consolidar_domingo else 0
+            columnas_ordenadas.append(clave_columna)
+            
+            if dia_sem < 5: 
+                diccionario_limites[clave_columna] = 0 if t_idx == 0 else 2
+            elif dia_sem == 5: 
+                diccionario_limites[clave_columna] = 2
+            else: 
+                diccionario_limites[clave_columna] = 2 if consolidar_domingo else 0
                 
-            # Recuperar si ya había sido editado
-            if col_name in st.session_state['limites_turno']:
-                diccionario_limites[col_name] = st.session_state['limites_turno'][col_name]
+            # Sobreescribir si el usuario ya había editado este límite en la sesión
+            if clave_interna in st.session_state['limites_turno']:
+                diccionario_limites[clave_columna] = st.session_state['limites_turno'][clave_interna]
 
-    # Convertimos en DataFrame de 1 sola fila
-    df_limites_editable = pd.DataFrame([diccionario_limites], index=["Límite Cuadrillas"])
+    # --- 2. RENDERIZAR LA FILA DE CONTROL EDITABLE ---
+    st.subheader("🗓️ Planificación Operativa")
+    st.caption("Edita la primera fila para ajustar el máximo de Cuadrillas de Turno. La matriz se recalculará automáticamente.")
     
-    st.subheader("🛠️ Fila de Control: Capacidad Operativa")
-    st.write("Edita esta fila para definir cuántas **cuadrillas de turno** pueden trabajar por cada tramo. *(0 = Turno bloqueado)*")
+    # Creamos el DataFrame para la tabla editable
+    df_limites = pd.DataFrame([diccionario_limites], index=["Máx Cuadrillas"]).reindex(columns=columnas_ordenadas)
     
-    # Renderizamos el data_editor en formato horizontal
-    df_editado = st.data_editor(df_limites_editable, use_container_width=False)
+    # Configuramos las columnas para que sean numéricas y estrechas
+    config_columnas = {col: st.column_config.NumberColumn(col, width="small", min_value=0, max_value=5, step=1) for col in columnas_ordenadas}
     
-    # Guardamos los cambios
-    st.session_state['limites_turno'] = df_editado.iloc[0].to_dict()
+    # Mostrar la tabla editable
+    df_editado = st.data_editor(
+        df_limites, 
+        use_container_width=True, 
+        column_config=config_columnas,
+        key="editor_limites" # Clave importante para que Streamlit detecte los cambios
+    )
     
+    # Guardamos los cambios detectados en la sesión (usando la clave interna que espera el modelo)
+    for col in columnas_ordenadas:
+        # Reconstruir la clave interna a partir del nombre de la columna visual
+        partes = col.split(" ")
+        fecha_texto = partes[0]
+        turno_texto = partes[1]
+        
+        # Necesitamos reconstruir el año para la clave interna. 
+        # Asumimos que el año es el mismo que fecha_inicio_plan, a menos que el mes cruce de año.
+        # (Esto es una simplificación, pero funciona bien para horizontes cortos).
+        fecha_dt = datetime.strptime(f"{fecha_inicio_plan.year}-{fecha_texto}", "%Y-%d-%m")
+        if fecha_dt.date() < fecha_inicio_plan:
+             fecha_dt = datetime.strptime(f"{fecha_inicio_plan.year + 1}-{fecha_texto}", "%Y-%d-%m")
+             
+        clave_interna = f"{fecha_dt.strftime('%Y-%m-%d')} {turno_texto}"
+        
+        st.session_state['limites_turno'][clave_interna] = df_editado.iloc[0][col]
+
     st.divider()
 
-    if st.button("🚀 Calcular Planificación Óptima", type="primary"):
-        # Le pasamos el diccionario editado al optimizador
+    # --- 3. CÁLCULO Y MATRIZ (Automático) ---
+    # Ya no hay botón, se calcula automáticamente con los límites guardados en sesión
+    with st.spinner('Optimizando planificación...'):
         df_matrix, df_recursos, msg = optimizar_plan(
             st.session_state['naves_db'], 
             fecha_inicio_plan, 
             turno_inicio_plan,
             cant_admin_max,
             consolidar_domingo,
+            cliente_filtro,
             st.session_state['limites_turno']
         )
         
+    if not df_matrix.empty:
+        if "EXCEPCIONES" in msg: st.warning(f"⚠️ {msg}")
+        else: st.success(f"✅ {msg}")
         
-        if not df_matrix.empty:
-            if "EXCEPCIONES" in msg: st.warning(f"⚠️ {msg}")
-            else: st.success(f"✅ {msg}")
-            
-            st.subheader("📋 Matriz de Planificación")
-            
-            pivot_df = df_matrix.pivot_table(
-                index=['Nave', 'Cliente', 'Producto', 'CutOff_Date', 'CutOff_Turn'],
-                columns=['Fecha', 'Turno'],
-                values='Cantidad',
-                aggfunc='sum',
-                fill_value=0
-            )
+        # Preparar la matriz pivotada
+        pivot_df = df_matrix.pivot_table(
+            index=['Nave', 'Cliente', 'Producto', 'CutOff_Date', 'CutOff_Turn'],
+            columns=['Fecha', 'Turno'],
+            values='Cantidad',
+            aggfunc='sum',
+            fill_value=0
+        )
 
-            min_date = df_matrix['Fecha'].min()
-            max_date = df_matrix['Fecha'].max()
-            days_span = (max_date - min_date).days + 1
-            full_columns = []
-            for d in range(days_span):
-                current_date = min_date + timedelta(days=d)
-                for t in ["T1", "T2", "T3"]: full_columns.append((current_date, t))
-            full_index = pd.MultiIndex.from_tuples(full_columns, names=['Fecha', 'Turno'])
-            pivot_df = pivot_df.reindex(columns=full_index, fill_value=0)            
-            
-            def format_zero(val): return "" if val == 0 else f"{val:.0f}"
-            def highlight_cutoff_precise(row):
-                if len(row.name) > 4:
-                    cutoff_date = row.name[3]
-                    cutoff_turn = row.name[4]
-                else: return ['' for _ in row]
-                styles = []
-                for (col_date, col_turno), val in row.items():
-                    es_cutoff = (col_date == cutoff_date and col_turno == cutoff_turn)
-                    if es_cutoff: styles.append('background-color: #ffe6e6; color: #990000; border: 2px solid #ff4b4b !important; font-weight: bold;')
-                    elif val > 0:
-                        if col_date > cutoff_date: styles.append('background-color: #fff4e5; color: #d97706; font-weight: bold;')
-                        else: styles.append('')
+        # Asegurar que todas las columnas de tiempo existan
+        min_date = df_matrix['Fecha'].min()
+        max_date = df_matrix['Fecha'].max()
+        days_span = (max_date - min_date).days + 1
+        full_columns = []
+        for d in range(days_span):
+            current_date = min_date + timedelta(days=d)
+            for t in ["T1", "T2", "T3"]: full_columns.append((current_date, t))
+        full_index = pd.MultiIndex.from_tuples(full_columns, names=['Fecha', 'Turno'])
+        pivot_df = pivot_df.reindex(columns=full_index, fill_value=0)            
+        
+        # Funciones de estilo
+        def format_zero(val): return "" if val == 0 else f"{val:.0f}"
+        
+        def highlight_cutoff_precise(row):
+            if len(row.name) > 4:
+                cutoff_date = row.name[3]
+                cutoff_turn = row.name[4]
+            else: return ['' for _ in row]
+            styles = []
+            for (col_date, col_turno), val in row.items():
+                es_cutoff = (col_date == cutoff_date and col_turno == cutoff_turn)
+                if es_cutoff: styles.append('background-color: #ffe6e6; color: #990000; border: 2px solid #ff4b4b !important; font-weight: bold;')
+                elif val > 0:
+                    if col_date > cutoff_date: styles.append('background-color: #fff4e5; color: #d97706; font-weight: bold;')
                     else: styles.append('')
-                return styles
+                else: styles.append('')
+            return styles
 
-            w_nave, w_clie, w_prod = 100, 100, 140
-            st.markdown(f"""
-                <style>
-                .table-container {{ width: 100%; max-height: 600px; overflow: auto; border: 1px solid #ccc; position: relative; }}
-                .custom-table {{ border-collapse: separate; border-spacing: 0; font-family: sans-serif; font-size: 13px; width: max-content; background-color: white; }}
-                .custom-table th, .custom-table td {{ border-right: 1px solid #e0e0e0; border-bottom: 1px solid #e0e0e0; padding: 6px 10px; white-space: nowrap; }}
-                .custom-table thead tr th {{ position: sticky; top: 0; background-color: #f0f2f6 !important; color: #333; z-index: 10; border-top: 1px solid #ccc; border-bottom: 2px solid #bbb; }}
-                .custom-table thead tr:nth-child(2) th {{ top: 30px; z-index: 10; }}
-                .custom-table tbody th.level0 {{ position: sticky; left: 0; min-width: {w_nave}px; max-width: {w_nave}px; background-color: #fff !important; z-index: 9; }}
-                .custom-table tbody th.level1 {{ position: sticky; left: {w_nave}px; min-width: {w_clie}px; max-width: {w_clie}px; background-color: #fff !important; z-index: 9; }}
-                .custom-table tbody th.level2 {{ position: sticky; left: {w_nave + w_clie}px; min-width: {w_prod}px; max-width: {w_prod}px; background-color: #fff !important; z-index: 9; border-right: 2px solid #aaa !important; box-shadow: 4px 0 5px -2px rgba(0,0,0,0.1); }}
-                </style>
-            """, unsafe_allow_html=True)
+        # Renderizar la tabla HTML
+        w_nave, w_clie, w_prod = 100, 100, 140
+        st.markdown(f"""
+            <style>
+            .table-container {{ width: 100%; max-height: 600px; overflow: auto; border: 1px solid #ccc; position: relative; margin-top: -15px; }} /* Margen negativo para acercarla a la tabla editable */
+            .custom-table {{ border-collapse: separate; border-spacing: 0; font-family: sans-serif; font-size: 13px; width: max-content; background-color: white; }}
+            .custom-table th, .custom-table td {{ border-right: 1px solid #e0e0e0; border-bottom: 1px solid #e0e0e0; padding: 6px 10px; white-space: nowrap; text-align: center; }}
+            .custom-table thead tr th {{ position: sticky; top: 0; background-color: #f0f2f6 !important; color: #333; z-index: 10; border-top: 1px solid #ccc; border-bottom: 2px solid #bbb; }}
+            .custom-table thead tr:nth-child(2) th {{ top: 30px; z-index: 10; }}
+            .custom-table tbody th.level0 {{ position: sticky; left: 0; min-width: {w_nave}px; max-width: {w_nave}px; background-color: #fff !important; z-index: 9; text-align: left; }}
+            .custom-table tbody th.level1 {{ position: sticky; left: {w_nave}px; min-width: {w_clie}px; max-width: {w_clie}px; background-color: #fff !important; z-index: 9; text-align: left; }}
+            .custom-table tbody th.level2 {{ position: sticky; left: {w_nave + w_clie}px; min-width: {w_prod}px; max-width: {w_prod}px; background-color: #fff !important; z-index: 9; border-right: 2px solid #aaa !important; box-shadow: 4px 0 5px -2px rgba(0,0,0,0.1); text-align: left; }}
+            </style>
+        """, unsafe_allow_html=True)
 
-            html_table = pivot_df.style\
-                .format(format_zero)\
-                .apply(highlight_cutoff_precise, axis=1)\
-                .hide(level='CutOff_Date', axis=0) \
-                .hide(level='CutOff_Turn', axis=0) \
-                .set_table_attributes('class="custom-table"')\
-                .to_html(escape=False, sparsify=False)
-            
-            st.markdown(f'<div class="table-container">{html_table}</div>', unsafe_allow_html=True)
-            
-            # ### NUEVO: Gráfico de Recursos Utilizados
-            st.divider()
-            st.subheader("📊 Uso de Cuadrillas")
-            if not df_recursos.empty:
-                # Agrupamos por día para ver ocupación
-                df_recursos['Día'] = df_recursos['fecha'].astype(str)
-                df_g_rec = df_recursos.groupby(['Día', 'turno_nom'])[['c_turno', 'c_admin']].sum().reset_index()
-                fig = px.bar(df_g_rec, x='Día', y=['c_turno', 'c_admin'], 
-                             title="Cuadrillas por Día (Turno vs Admin)",
-                             labels={'value': 'Cantidad Cuadrillas', 'variable': 'Tipo'},
-                             barmode='group')
-                st.plotly_chart(fig, use_container_width=True)
+        # Modificamos los encabezados de la tabla HTML para que coincidan visualmente con la editable
+        html_table = pivot_df.rename(columns=lambda x: f"{x.strftime('%d-%m')}" if isinstance(x, datetime) else x, level=0).style\
+            .format(format_zero)\
+            .apply(highlight_cutoff_precise, axis=1)\
+            .hide(level='CutOff_Date', axis=0) \
+            .hide(level='CutOff_Turn', axis=0) \
+            .set_table_attributes('class="custom-table"')\
+            .to_html(escape=False, sparsify=False)
+        
+        st.markdown(f'<div class="table-container">{html_table}</div>', unsafe_allow_html=True)
+        
+        # --- 4. GRÁFICOS ---
+        st.divider()
+        st.subheader("📊 Uso de Cuadrillas")
+        if not df_recursos.empty:
+            df_recursos['Día'] = df_recursos['fecha'].astype(str)
+            df_g_rec = df_recursos.groupby(['Día', 'turno_nom'])[['c_turno', 'c_admin']].sum().reset_index()
+            fig = px.bar(df_g_rec, x='Día', y=['c_turno', 'c_admin'], 
+                         title="Cuadrillas Asignadas por Día (Turno vs Admin)",
+                         labels={'value': 'Cantidad Cuadrillas', 'variable': 'Tipo'},
+                         barmode='group')
+            st.plotly_chart(fig, use_container_width=True)
 
-            st.divider()
-        else:
-            st.error(f"❌ {msg}")
+    else:
+        st.error(f"❌ {msg}")
 else:
-    st.info("👈 Agrega Naves para comenzar.")
+    st.info("👈 Agrega Naves en la barra lateral para comenzar la planificación.")
 
 
 
