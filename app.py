@@ -142,7 +142,7 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
             for p in products:
                 model.Add(x[p, s, 'Turno'] == 0)
                 model.Add(x[p, s, 'Admin'] == 0)
-else:
+        else:
             # Límite global por turno (Máximo 2 cuadrillas operativas)
             model.Add(sum(x[p, s, 'Turno'] for p in products) <= 2)
             model.Add(sum(x[p, s, 'Admin'] for p in products) <= cant_admin_max)
@@ -545,6 +545,7 @@ if st.session_state['naves_db']:
             st.error(f"❌ {msg}")
 else:
     st.info("👈 Agrega Naves para comenzar.")
+
 
 
 
