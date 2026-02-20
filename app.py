@@ -319,6 +319,8 @@ with st.sidebar:
     col_conf1, col_conf2 = st.columns(2)
     fecha_inicio_plan = col_conf1.date_input("Fecha Inicio", value=datetime.now().date())
     turno_inicio_plan = col_conf2.selectbox("Turno Inicio", ["T1", "T2", "T3"])
+
+    cliente_filtro = st.selectbox("Filtrar Cliente a Planificar", ["Todo", "ARAUCO", "CMPC"])
     
     st.divider()
     
@@ -592,6 +594,7 @@ if st.session_state['naves_db']:
             st.error(f"❌ {msg}")
 else:
     st.info("👈 Agrega Naves para comenzar.")
+
 
 
 
