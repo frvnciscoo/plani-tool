@@ -201,7 +201,7 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
                 'nave': nombre_nave, 'cliente': item['cliente'], 'producto': item['producto'],
                 'cantidad': item['cantidad'], 'deadline': deadline_idx,
                 'fecha_corte': dt_corte.date(), 'turno_corte': t_name
-            })})
+            })
 
     cost = 0
     for p in products:
@@ -636,6 +636,7 @@ if st.session_state['naves_db']:
         st.error(f"❌ {msg}")
 else:
     st.info("👈 Agrega Naves en la barra lateral para comenzar la planificación.")
+
 
 
 
