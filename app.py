@@ -76,8 +76,14 @@ def procesar_archivo_carga(uploaded_file):
         if not all(col in df.columns for col in required_cols):
             return None, None, f"Faltan columnas clave: {required_cols}"
 
+        # Filtrar por Terminal
         df = df[df['Terminal'].astype(str).str.upper().str.strip() == "SVTI"].copy()
-        if df.empty: return None, None, "No hay registros SVTI."
+        
+        # ---> NUEVO: Filtrar exclusiones de ROLEO <---
+        if 'N° Reserva' in df.columns:
+            df = df[~df['N° Reserva'].astype(str).str.upper().str.contains("ROLEO", na=False)]
+            
+        if df.empty: return None, None, "No hay registros SVTI válidos o todos son ROLEO."
         
         df['dt_corte'] = df['Stacking'].astype(str).apply(extraer_fecha_cutoff)
         df_fechas = df.dropna(subset=['dt_corte']).groupby('Nave')['dt_corte'].min().reset_index()
@@ -120,9 +126,8 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
 
     for s in range(num_shifts):
         for p in products:
-            # Cuadrillas Turno (Operativas) y Admin
-            x[p, s, 'Turno'] = model.NewIntVar(0, 3, f'gang_T_{p}_{s}')
-            # ### NUEVO: El límite superior de Admin ahora es dinámico (cant_admin_max)
+            # ---> NUEVO: Límite máximo de cuadrillas de Turno reducido a 2 <---
+            x[p, s, 'Turno'] = model.NewIntVar(0, 2, f'gang_T_{p}_{s}')
             x[p, s, 'Admin'] = model.NewIntVar(0, cant_admin_max, f'gang_A_{p}_{s}')
             
             rate_t = RENDIMIENTOS[p]['Turno']
@@ -133,53 +138,52 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
 
     # --- C. Restricciones Operativas y de Calendario ---
     for s in range(num_shifts):
-        # 1. Restricción básica de inicio (offset)
         if s < start_offset:
             for p in products:
                 model.Add(x[p, s, 'Turno'] == 0)
                 model.Add(x[p, s, 'Admin'] == 0)
         else:
-            # Límites globales por turno
-            model.Add(sum(x[p, s, 'Turno'] for p in products) <= 3)
-            # ### NUEVO: Límite global Admin según input usuario
+            # ---> NUEVO: Límite global por turno reducido a 2 <---
+            model.Add(sum(x[p, s, 'Turno'] for p in products) <= 2)
             model.Add(sum(x[p, s, 'Admin'] for p in products) <= cant_admin_max)
             
-            # Admin solo trabaja en T1 (si s%3 == 0 es T1, s%3==1 es T2, etc)
-            # Asumimos que Admin es horario diurno estandar (generalmente coincide con T1 o parte de T2)
-            # Ajuste estándar: Admin suele trabajar en horario de oficina.
-            # Aquí forzamos que Admin NO trabaje en T2 ni T3 (solo T1)
-            if s % 3 != 0:
+            # ---> NUEVO: T1 Exclusivo para Admin, T2/T3 exclusivos para Turno <---
+            if s % 3 == 0:
+                # Es T1: Bloqueamos cuadrillas de turno operativo
+                for p in products:
+                    model.Add(x[p, s, 'Turno'] == 0)
+            else:
+                # Es T2 o T3: Bloqueamos cuadrillas administrativas
                 for p in products:
                     model.Add(x[p, s, 'Admin'] == 0)
 
-            # ### NUEVO: Lógica de Días de la Semana
             day_idx = s // 3
             fecha_actual = today + timedelta(days=day_idx)
-            dia_semana = fecha_actual.weekday() # 0=Lunes, 5=Sábado, 6=Domingo
+            dia_semana = fecha_actual.weekday() 
 
-            # REGLA 1: Cuadrillas Operativas ("Turno") SOLO de Lunes a Viernes (0 a 4)
-            # Significa que Sábado (5) y Domingo (6) NO hay cuadrillas turno.
+            # REGLA 1: Fin de semana (Sábado y Domingo sin cuadrillas "Turno")
             if dia_semana >= 5: 
                 for p in products:
-
+                    # En la lógica original solo tenías Admin = 0 aquí, pero T1 ahora es solo Admin.
+                    # Si el fin de semana NO hay Turno, lo aseguramos explícitamente:
+                    model.Add(x[p, s, 'Turno'] == 0)
+                    # Y bloqueamos Admin también en sábados si así operan (ajustado de tu código base)
                     model.Add(x[p, s, 'Admin'] == 0)
 
             # REGLA 2: Consolidar Domingo (Switch On/Off)
-            # Si consolidar_domingo es False, nadie trabaja el domingo (ni Admin ni Turno)
             if dia_semana == 6 and not consolidar_domingo:
                 for p in products:
                     model.Add(x[p, s, 'Turno'] == 0)
                     model.Add(x[p, s, 'Admin'] == 0)
 
-    # Límite diario de Admins (ya cubierto por restricción por turno si solo van en T1)
-    # Dejamos restricción de seguridad:
+    # Límite diario de Admins
     for d in range(days_horizon):
         s1, s2, s3 = d*3, d*3+1, d*3+2
         current_shifts = [s for s in [s1, s2, s3] if s < num_shifts]
         total_admin_day = sum(x[p, s, 'Admin'] for p in products for s in current_shifts)
         model.Add(total_admin_day <= cant_admin_max)
 
-    # --- D. Procesamiento de Demandas (Igual que antes) ---
+    # --- D. Procesamiento de Demandas ---
     demandas_detalladas = []
     grouped_demands = [] 
     
@@ -231,8 +235,9 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
             t_gangs = sum(x[p, s, 'Turno'] for p in products)
             a_gangs = sum(x[p, s, 'Admin'] for p in products)
             is_saturated = model.NewBoolVar(f'sat_{s}')
-            model.Add(t_gangs >= 3).OnlyEnforceIf(is_saturated)
-            model.Add(t_gangs < 3).OnlyEnforceIf(is_saturated.Not())
+            # ---> NUEVO: Ajuste de la penalización de costo para cuando alcanza el máximo de 2 <---
+            model.Add(t_gangs >= 2).OnlyEnforceIf(is_saturated)
+            model.Add(t_gangs < 2).OnlyEnforceIf(is_saturated.Not())
             cost += t_gangs*10 + (a_gangs) + (is_saturated * 100)
 
     model.Minimize(cost)
@@ -521,5 +526,6 @@ if st.session_state['naves_db']:
             st.error(f"❌ {msg}")
 else:
     st.info("👈 Agrega Naves para comenzar.")
+
 
 
