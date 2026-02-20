@@ -142,24 +142,43 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
             for p in products:
                 model.Add(x[p, s, 'Turno'] == 0)
                 model.Add(x[p, s, 'Admin'] == 0)
-        else:
-            # ---> NUEVO: Límite global por turno reducido a 2 <---
+else:
+            # Límite global por turno (Máximo 2 cuadrillas operativas)
             model.Add(sum(x[p, s, 'Turno'] for p in products) <= 2)
             model.Add(sum(x[p, s, 'Admin'] for p in products) <= cant_admin_max)
             
-            # ---> NUEVO: T1 Exclusivo para Admin, T2/T3 exclusivos para Turno <---
-            if s % 3 == 0:
-                # Es T1: Bloqueamos cuadrillas de turno operativo
-                for p in products:
-                    model.Add(x[p, s, 'Turno'] == 0)
-            else:
-                # Es T2 o T3: Bloqueamos cuadrillas administrativas
-                for p in products:
-                    model.Add(x[p, s, 'Admin'] == 0)
-
             day_idx = s // 3
             fecha_actual = today + timedelta(days=day_idx)
-            dia_semana = fecha_actual.weekday() 
+            dia_semana = fecha_actual.weekday() # 0=Lunes, ..., 5=Sábado, 6=Domingo
+
+            # --- LÓGICA DE TURNOS SEGÚN DÍA DE LA SEMANA ---
+            
+            if dia_semana < 5: 
+                # LUNES A VIERNES: T1 exclusivo Admin, T2/T3 exclusivo Turno
+                if s % 3 == 0:
+                    for p in products:
+                        model.Add(x[p, s, 'Turno'] == 0)
+                else:
+                    for p in products:
+                        model.Add(x[p, s, 'Admin'] == 0)
+                        
+            elif dia_semana == 5:
+                # SÁBADO: Cero Admin. Cuadrillas de Turno pueden trabajar en T1, T2 y T3.
+                for p in products:
+                    model.Add(x[p, s, 'Admin'] == 0)
+                    # No restringimos 'Turno', el modelo decidirá si los usa en T1, T2 o T3
+                    
+            elif dia_semana == 6:
+                # DOMINGO: Depende del botón "Consolidar Domingo"
+                if not consolidar_domingo:
+                    # Domingo bloqueado totalmente
+                    for p in products:
+                        model.Add(x[p, s, 'Turno'] == 0)
+                        model.Add(x[p, s, 'Admin'] == 0)
+                else:
+                    # Domingo habilitado (Asumimos misma regla operativa que el sábado)
+                    for p in products:
+                        model.Add(x[p, s, 'Admin'] == 0)
 
             # REGLA 1: Fin de semana (Sábado y Domingo sin cuadrillas "Turno")
             if dia_semana >= 5: 
@@ -526,6 +545,7 @@ if st.session_state['naves_db']:
             st.error(f"❌ {msg}")
 else:
     st.info("👈 Agrega Naves para comenzar.")
+
 
 
 
