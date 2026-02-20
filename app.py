@@ -387,21 +387,22 @@ with st.sidebar:
                     for index, row in df_resumen.iterrows():
                         nave = row['Nave']
                         prod = row['Producto_Homologado']
-                        if prod in RENDIMIENTOS:
-                            st.session_state['naves_db'][nave]['carga'].append({
-                                "cliente": row['Cliente'], "producto": prod, "cantidad": int(row['Box Saldo'])
-                            })
-                            count_carga += 1
-                        else:
-                            if "Otros" in RENDIMIENTOS:
-                                st.session_state['naves_db'][nave]['carga'].append({
-                                    "cliente": row['Cliente'], "producto": "Otros", "cantidad": int(row['Box Saldo'])
-                                })
-                                count_carga += 1
-                    st.success(f"✅ Cargadas {count_naves} naves y {count_carga} líneas de carga.")
-                    st.rerun()
-            else:
-                st.error(f"Error: {status}")
+                    
+                        # 🔒 GARANTÍA DE EXISTENCIA
+                        if nave not in st.session_state['naves_db']:
+                            st.session_state['naves_db'][nave] = {
+                                "datetime_corte": datetime.now(),
+                                "carga": []
+                            }
+                    
+                        if prod not in RENDIMIENTOS:
+                            prod = "Otros"
+                    
+                        st.session_state['naves_db'][nave]['carga'].append({
+                            "cliente": row['Cliente'],
+                            "producto": prod,
+                            "cantidad": int(row['Box Saldo'])
+                        })
 
     st.divider()
     st.subheader("📋 Naves Activas")
@@ -520,4 +521,5 @@ if st.session_state['naves_db']:
             st.error(f"❌ {msg}")
 else:
     st.info("👈 Agrega Naves para comenzar.")
+
 
