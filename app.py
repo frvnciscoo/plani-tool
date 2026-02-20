@@ -172,6 +172,7 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
         total_admin_day = sum(x[p, s, 'Admin'] for p in products for s in current_shifts)
         model.Add(total_admin_day <= cant_admin_max)
 
+    
     # --- D. Procesamiento de Demandas ---
     demandas_detalladas = []
     grouped_demands = [] 
@@ -182,23 +183,25 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
         t_idx, t_name = obtener_turno_de_hora(dt_corte.time())
         deadline_idx = max(0, (diff_days * 3) + t_idx)
         
-            for item in datos['carga']:
-                    # ---> APLICAR EL FILTRO DE CLIENTE <---
-                    if cliente_filtro != "Todo" and item['cliente'].upper() != cliente_filtro:
-                        continue
-        
-                    if item['producto'] not in products:
-                        if "Otros" in products: 
-                            item['producto'] = "Otros"
-                        else: 
-                            continue
+        for item in datos['carga']:
+            # 1. Aplicar filtro de cliente
+            if cliente_filtro != "Todo" and item['cliente'].upper() != cliente_filtro:
+                continue
 
+            # 2. Validar que el producto exista (si no, pasa a "Otros")
+            if item['producto'] not in products:
+                if "Otros" in products: 
+                    item['producto'] = "Otros"
+                else: 
+                    continue
+
+            # 3. Guardar la demanda (¡Esta línea debe estar a la misma altura que el 'if' anterior!)
             grouped_demands.append({'producto': item['producto'], 'cantidad': item['cantidad'], 'deadline': deadline_idx})
             demandas_detalladas.append({
                 'nave': nombre_nave, 'cliente': item['cliente'], 'producto': item['producto'],
                 'cantidad': item['cantidad'], 'deadline': deadline_idx,
                 'fecha_corte': dt_corte.date(), 'turno_corte': t_name
-            })
+            })})
 
     cost = 0
     for p in products:
@@ -633,6 +636,7 @@ if st.session_state['naves_db']:
         st.error(f"❌ {msg}")
 else:
     st.info("👈 Agrega Naves en la barra lateral para comenzar la planificación.")
+
 
 
 
