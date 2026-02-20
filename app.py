@@ -104,7 +104,7 @@ def procesar_archivo_carga(uploaded_file):
 # 3. MOTOR DE OPTIMIZACIÓN (ACTUALIZADO)
 # ==============================================================================
 # ### NUEVO: Agregamos parámetros extra a la función
-def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_admin_max, consolidar_domingo, limites_turno):
+def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_admin_max, consolidar_domingo):
     model = cp_model.CpModel()
     
     if not naves_db: return pd.DataFrame(), pd.DataFrame(), "No hay naves."
@@ -126,8 +126,8 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
 
     for s in range(num_shifts):
         for p in products:
-            # Ampliamos a 5 por si pones excepciones altas en la tabla
-            x[p, s, 'Turno'] = model.NewIntVar(0, 5, f'gang_T_{p}_{s}')
+            # ---> NUEVO: Límite máximo de cuadrillas de Turno reducido a 2 <---
+            x[p, s, 'Turno'] = model.NewIntVar(0, 2, f'gang_T_{p}_{s}')
             x[p, s, 'Admin'] = model.NewIntVar(0, cant_admin_max, f'gang_A_{p}_{s}')
             
             rate_t = RENDIMIENTOS[p]['Turno']
@@ -143,25 +143,79 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
                 model.Add(x[p, s, 'Turno'] == 0)
                 model.Add(x[p, s, 'Admin'] == 0)
         else:
+            # Límite global por turno (Máximo 2 cuadrillas operativas)
+            model.Add(sum(x[p, s, 'Turno'] for p in products) <= 2)
+            model.Add(sum(x[p, s, 'Admin'] for p in products) <= cant_admin_max)
+            
             day_idx = s // 3
             fecha_actual = today + timedelta(days=day_idx)
-            dia_semana = fecha_actual.weekday() 
-            turno_str = TURNOS_INFO[s % 3]
+            dia_semana = fecha_actual.weekday() # 0=Lunes, ..., 5=Sábado, 6=Domingo
+
+            # --- LÓGICA DE TURNOS SEGÚN DÍA DE LA SEMANA ---
             
-            # --- 1. LÍMITE DE TURNOS (Leído directamente de la tabla editable UI) ---
-            clave_limite = f"{fecha_actual.strftime('%Y-%m-%d')}_{turno_str}"
-            limite_t = limites_turno.get(clave_limite, 0)
-            model.Add(sum(x[p, s, 'Turno'] for p in products) <= limite_t)
-            
-            # --- 2. LÓGICA DE ADMIN (Se mantiene automática) ---
-            model.Add(sum(x[p, s, 'Admin'] for p in products) <= cant_admin_max)
             if dia_semana < 5: 
-                # Lunes a Viernes: Admin solo en T1
-                if s % 3 != 0:
-                    for p in products: model.Add(x[p, s, 'Admin'] == 0)
-            else:
-                # Fines de semana: Cero Admin
-                for p in products: model.Add(x[p, s, 'Admin'] == 0)
+                # LUNES A VIERNES: T1 exclusivo Admin, T2/T3 exclusivo Turno
+                if s % 3 == 0:
+                    for p in products:
+                        model.Add(x[p, s, 'Turno'] == 0)
+                else:
+                    for p in products:
+                        model.Add(x[p, s, 'Admin'] == 0)
+                        
+            elif dia_semana == 5:
+                # SÁBADO: Cero Admin. Cuadrillas de Turno pueden trabajar en T1, T2 y T3.
+                for p in products:
+                    model.Add(x[p, s, 'Admin'] == 0)
+                    # No restringimos 'Turno', el modelo decidirá si los usa en T1, T2 o T3
+                    
+            elif dia_semana == 6:
+                # DOMINGO: Depende del botón "Consolidar Domingo"
+                if not consolidar_domingo:
+                    # Domingo bloqueado totalmente
+                    for p in products:
+                        model.Add(x[p, s, 'Turno'] == 0)
+                        model.Add(x[p, s, 'Admin'] == 0)
+                else:
+                    # Domingo habilitado (Asumimos misma regla operativa que el sábado)
+                    for p in products:
+                        model.Add(x[p, s, 'Admin'] == 0)
+
+            # REGLA 1: Fin de semana (Sábado y Domingo sin cuadrillas "Turno")
+            day_idx = s // 3
+            fecha_actual = today + timedelta(days=day_idx)
+            dia_semana = fecha_actual.weekday() # 0=Lunes, ..., 5=Sábado, 6=Domingo
+
+            # --- LÓGICA DE TURNOS SEGÚN DÍA DE LA SEMANA ---
+            if dia_semana < 5: 
+                # LUNES A VIERNES: T1 exclusivo Admin, T2/T3 exclusivo Turno
+                if s % 3 == 0:
+                    for p in products:
+                        model.Add(x[p, s, 'Turno'] == 0)
+                else:
+                    for p in products:
+                        model.Add(x[p, s, 'Admin'] == 0)
+                        
+            elif dia_semana == 5:
+                # SÁBADO: Cero Admin. Cuadrillas de Turno pueden trabajar en T1, T2 y T3.
+                for p in products:
+                    model.Add(x[p, s, 'Admin'] == 0)
+                    # Al no poner restricciones a 'Turno', el modelo los usará libremente
+                    
+            elif dia_semana == 6:
+                # DOMINGO: Depende del botón "Consolidar Domingo"
+                if not consolidar_domingo:
+                    for p in products:
+                        model.Add(x[p, s, 'Turno'] == 0)
+                        model.Add(x[p, s, 'Admin'] == 0)
+                else:
+                    for p in products:
+                        model.Add(x[p, s, 'Admin'] == 0)
+
+            # REGLA 2: Consolidar Domingo (Switch On/Off)
+            if dia_semana == 6 and not consolidar_domingo:
+                for p in products:
+                    model.Add(x[p, s, 'Turno'] == 0)
+                    model.Add(x[p, s, 'Admin'] == 0)
 
     # Límite diario de Admins
     for d in range(days_horizon):
@@ -221,21 +275,11 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
         if s >= start_offset:
             t_gangs = sum(x[p, s, 'Turno'] for p in products)
             a_gangs = sum(x[p, s, 'Admin'] for p in products)
-            
-            # --- PENALIZACIÓN DINÁMICA DE COSTO ---
-            day_idx = s // 3
-            fecha_actual = today + timedelta(days=day_idx)
-            turno_str = TURNOS_INFO[s % 3]
-            clave_limite = f"{fecha_actual.strftime('%Y-%m-%d')}_{turno_str}"
-            limite_s = limites_turno.get(clave_limite, 2)
-            
-            if limite_s > 0:
-                is_saturated = model.NewBoolVar(f'sat_{s}')
-                model.Add(t_gangs >= limite_s).OnlyEnforceIf(is_saturated)
-                model.Add(t_gangs < limite_s).OnlyEnforceIf(is_saturated.Not())
-                cost += t_gangs*10 + (a_gangs) + (is_saturated * 100)
-            else:
-                cost += t_gangs*10 + (a_gangs)
+            is_saturated = model.NewBoolVar(f'sat_{s}')
+            # ---> NUEVO: Ajuste de la penalización de costo para cuando alcanza el máximo de 2 <---
+            model.Add(t_gangs >= 2).OnlyEnforceIf(is_saturated)
+            model.Add(t_gangs < 2).OnlyEnforceIf(is_saturated.Not())
+            cost += t_gangs*10 + (a_gangs) + (is_saturated * 100)
 
     model.Minimize(cost)
     
@@ -431,56 +475,6 @@ with st.sidebar:
 # 5. DASHBOARD PRINCIPAL
 # ==============================================================================
 if st.session_state['naves_db']:
-# --- NUEVO: PRE-CÁLCULO DE LA TABLA EDITABLE ---
-    fechas_corte_pre = [data['datetime_corte'].date() for data in st.session_state['naves_db'].values()]
-    max_date_pre = max(fechas_corte_pre) if fechas_corte_pre else fecha_inicio_plan
-    days_horizon_pre = max((max_date_pre - fecha_inicio_plan).days + 7, 2)
-    
-    cap_data = []
-    for d in range(days_horizon_pre):
-        fecha_obj = fecha_inicio_plan + timedelta(days=d)
-        dia_sem = fecha_obj.weekday()
-        
-        # Reglas estándar de llenado inicial
-        if dia_sem < 5: # Lunes a Viernes
-            t1, t2, t3 = 0, 2, 2
-        elif dia_sem == 5: # Sábado
-            t1, t2, t3 = 2, 2, 2
-        else: # Domingo
-            if consolidar_domingo: t1, t2, t3 = 2, 2, 2
-            else: t1, t2, t3 = 0, 0, 0
-                
-        cap_data.append({
-            "Fecha": fecha_obj.strftime("%Y-%m-%d"),
-            "Día": ["Lun", "Mar", "Mié", "Jue", "Vie", "Sáb", "Dom"][dia_sem],
-            "T1": t1, "T2": t2, "T3": t3
-        })
-    
-    st.subheader("🗓️ Ajuste Manual de Capacidad (Cuadrillas Operativas)")
-    st.write("Edita directamente las celdas para cambiar el máximo de cuadrillas por turno antes de calcular. *(0 significa bloqueado)*")
-    
-    # Renderizamos la tabla editable
-    edited_cap_df = st.data_editor(
-        pd.DataFrame(cap_data),
-        column_config={
-            "Fecha": st.column_config.TextColumn("Fecha", disabled=True),
-            "Día": st.column_config.TextColumn("Día", disabled=True),
-            "T1": st.column_config.NumberColumn("T1", min_value=0, max_value=5, step=1),
-            "T2": st.column_config.NumberColumn("T2", min_value=0, max_value=5, step=1),
-            "T3": st.column_config.NumberColumn("T3", min_value=0, max_value=5, step=1),
-        },
-        hide_index=True,
-        use_container_width=True
-    )
-    
-    # Convertimos la tabla editada a un diccionario para el modelo
-    limites_turno_dict = {}
-    for _, row in edited_cap_df.iterrows():
-        limites_turno_dict[f"{row['Fecha']}_T1"] = row['T1']
-        limites_turno_dict[f"{row['Fecha']}_T2"] = row['T2']
-        limites_turno_dict[f"{row['Fecha']}_T3"] = row['T3']
-        
-    st.divider()    
     if st.button("🚀 Calcular Planificación Óptima", type="primary"):
         # ### NUEVO: Pasamos las variables de configuración
         df_matrix, df_recursos, msg = optimizar_plan(
@@ -573,7 +567,6 @@ if st.session_state['naves_db']:
             st.error(f"❌ {msg}")
 else:
     st.info("👈 Agrega Naves para comenzar.")
-
 
 
 
