@@ -182,12 +182,17 @@ def optimizar_plan(naves_db, fecha_inicio_simulacion, turno_inicio_str, cant_adm
         t_idx, t_name = obtener_turno_de_hora(dt_corte.time())
         deadline_idx = max(0, (diff_days * 3) + t_idx)
         
-        for item in datos['carga']:
+    for item in datos['carga']:
             # ---> APLICAR EL FILTRO DE CLIENTE <---
             if cliente_filtro != "Todo" and item['cliente'].upper() != cliente_filtro:
                 continue
 
             if item['producto'] not in products:
+                if "Otros" in products: 
+                    item['producto'] = "Otros"
+                else: 
+                    continue
+
             grouped_demands.append({'producto': item['producto'], 'cantidad': item['cantidad'], 'deadline': deadline_idx})
             demandas_detalladas.append({
                 'nave': nombre_nave, 'cliente': item['cliente'], 'producto': item['producto'],
@@ -628,6 +633,7 @@ if st.session_state['naves_db']:
         st.error(f"❌ {msg}")
 else:
     st.info("👈 Agrega Naves en la barra lateral para comenzar la planificación.")
+
 
 
 
