@@ -411,22 +411,47 @@ with st.sidebar:
     st.divider()
     st.subheader("📋 Naves Activas")
     naves_to_delete = []
+    
     for nave, data in st.session_state['naves_db'].copy().items():
         if 'datetime_corte' not in data:
             naves_to_delete.append(nave)
             continue
+            
         dt_show = data['datetime_corte']
-        with st.expander(f"{nave} | {dt_show.strftime('%d-%m %H:%M')}"): 
-            if not data['carga']: st.write("*Sin carga*")
+        
+        with st.expander(f"🚢 {nave} | {dt_show.strftime('%d-%m %H:%M')}"): 
+            
+            # --- NUEVO: Editar Fecha/Hora de Corte ---
+            st.caption("✏️ Modificar CutOff / Stacking")
+            col_d, col_t = st.columns(2)
+            new_date = col_d.date_input("Fecha", value=dt_show.date(), key=f"edit_d_{nave}")
+            new_time = col_t.time_input("Hora", value=dt_show.time(), key=f"edit_t_{nave}")
+            
+            if st.button("💾 Actualizar Corte", key=f"save_{nave}", use_container_width=True):
+                st.session_state['naves_db'][nave]['datetime_corte'] = datetime.combine(new_date, new_time)
+                st.rerun() # Recarga para mostrar la nueva fecha en el título del expander
+                
+            st.divider()
+            # ----------------------------------------
+            
+            # Mostrar la carga
+            if not data['carga']: 
+                st.write("*Sin carga*")
             else:
                 df_temp = pd.DataFrame(data['carga'])
                 if not df_temp.empty:
                     df_g = df_temp.groupby('producto')['cantidad'].sum()
-                    for p, q in df_g.items(): st.write(f"- {q} {p}")
-            if st.button(f"Borrar {nave}", key=f"del_{nave}"): naves_to_delete.append(nave)
+                    for p, q in df_g.items(): 
+                        st.write(f"- {q} {p}")
+            
+            # Botón de borrar con un toque visual
+            if st.button(f"🗑️ Borrar Nave", key=f"del_{nave}"): 
+                naves_to_delete.append(nave)
+                
     if naves_to_delete:
         for n in set(naves_to_delete): 
-            if n in st.session_state['naves_db']: del st.session_state['naves_db'][n]
+            if n in st.session_state['naves_db']: 
+                del st.session_state['naves_db'][n]
         st.rerun()
 
 # ==============================================================================
@@ -567,6 +592,7 @@ if st.session_state['naves_db']:
             st.error(f"❌ {msg}")
 else:
     st.info("👈 Agrega Naves para comenzar.")
+
 
 
 
